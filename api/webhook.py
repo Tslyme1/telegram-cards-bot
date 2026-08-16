@@ -184,5 +184,10 @@ def webhook():
         return jsonify({"ok": False}), 401
 
     update = request.get_json(force=True, silent=True) or {}
-    _dispatch(update)
+    try:
+        _dispatch(update)
+    except Exception:
+        # Always acknowledge the update: a non-200 makes Telegram redeliver the
+        # same update indefinitely, turning one broken command into a retry loop.
+        app.logger.exception("Failed to handle update")
     return jsonify({"ok": True})
