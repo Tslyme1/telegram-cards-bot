@@ -316,10 +316,8 @@ def send_cards_list(source_chat_id, target_chat_id, message_id) -> None:
     if not rows:
         text = "Пока никто не получал карточек."
     else:
-        lines = ["Карточки участников чата:"]
-        for name, yellow, red in rows:
-            lines.append(f"{name}: 🟨 {yellow} 🟥 {red}")
-        text = "\n".join(lines)
+        entries = [f"{name}:\n🟨 {yellow} 🟥 {red}" for name, yellow, red in rows]
+        text = "Карточки участников чата:\n\n" + "\n\n".join(entries)
 
     if message_id is None:
         tg.send_message(target_chat_id, text)

@@ -134,11 +134,9 @@ async def cards_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("Пока никто не получал карточек.")
         return
 
-    lines = ["Карточки участников чата:"]
-    for name, yellow, red in rows:
-        lines.append(f"{name}: 🟨 {yellow} 🟥 {red}")
+    entries = [f"{name}:\n🟨 {yellow} 🟥 {red}" for name, yellow, red in rows]
 
-    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_text("Карточки участников чата:\n\n" + "\n\n".join(entries))
 
 
 def main() -> None:
