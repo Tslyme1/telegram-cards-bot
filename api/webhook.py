@@ -109,7 +109,9 @@ def ask_for_target(dm_chat_id, message_id, chat_id, giver_id=None) -> None:
 
 
 def ask_for_reason(dm_chat_id, message_id, chat_id, target_id, giver_id) -> None:
-    storage.set_state(giver_id, {"chat_id": str(chat_id), "target_id": str(target_id)})
+    storage.set_state(
+        giver_id, {"step": "reason", "chat_id": str(chat_id), "target_id": str(target_id)}
+    )
 
     target_name = storage.get_name(chat_id, target_id) or str(target_id)
     keyboard = {
@@ -127,20 +129,22 @@ def ask_for_reason(dm_chat_id, message_id, chat_id, target_id, giver_id) -> None
     )
 
 
-def finish_give(giver: dict, dm_chat_id, chat_id, target_id, reason: str | None) -> None:
+def finish_give(giver: dict, ack_chat_id, chat_id, target_id, reason: str | None) -> None:
+    """Award the card in `chat_id`; progress and errors go to `ack_chat_id`."""
     storage.clear_state(giver["id"])
 
     giver_name = display_name(giver)
     target_name = storage.get_name(chat_id, target_id) or str(target_id)
+    given_from_group = str(ack_chat_id) == str(chat_id)
 
     if not tg.is_chat_member(chat_id, giver["id"]):
-        tg.send_message(dm_chat_id, "Вы больше не состоите в этом чате — карточка не выдана.")
+        tg.send_message(ack_chat_id, "Вы больше не состоите в этом чате — карточка не выдана.")
         return
 
     key = cooldown_key(chat_id, giver["id"])
     remaining = kv.ttl(key)
     if remaining > 0:
-        tg.send_message(dm_chat_id, f"Подождите ещё {remaining} сек. перед следующей карточкой.")
+        tg.send_message(ack_chat_id, f"Подождите ещё {remaining} сек. перед следующей карточкой.")
         return
     kv.set(key, "1", ex=GIVE_COOLDOWN_SECONDS)
 
@@ -172,7 +176,45 @@ def finish_give(giver: dict, dm_chat_id, chat_id, target_id, reason: str | None)
             f"🟨 {target_name} получает жёлтую карточку ({yellow}/{YELLOW_THRESHOLD}).{details}",
         )
 
-    tg.send_message(dm_chat_id, f"Готово, карточка выдана: {target_name}.")
+    if not given_from_group:
+        tg.send_message(ack_chat_id, f"Готово, карточка выдана: {target_name}.")
+
+
+def show_group_picker(chat_id, giver: dict, reason: str | None) -> None:
+    participants = [
+        (uid, name)
+        for uid, name in storage.list_participants(chat_id)
+        if str(uid) != str(giver["id"])
+    ]
+
+    if not participants:
+        tg.send_message(
+            chat_id,
+            "Я пока никого не видел в этом чате. Ответьте командой на сообщение участника "
+            "или подождите, пока участники что-нибудь напишут.",
+        )
+        return
+
+    # The reason can be longer than callback_data allows, so it waits in the
+    # state until the giver taps a name.
+    storage.set_state(
+        giver["id"], {"step": "pick", "chat_id": str(chat_id), "reason": reason}
+    )
+
+    prompt = f"{display_name(giver)}, кому выдать жёлтую карточку?"
+    if reason:
+        prompt += f"\nПричина: {reason}"
+
+    tg.send_message(
+        chat_id,
+        prompt,
+        reply_markup={
+            "inline_keyboard": [
+                *[[{"text": name, "callback_data": f"gu:{chat_id}:{uid}"}] for uid, name in participants],
+                [CANCEL_BUTTON],
+            ]
+        },
+    )
 
 
 # --- commands ---------------------------------------------------------------
@@ -181,18 +223,29 @@ def finish_give(giver: dict, dm_chat_id, chat_id, target_id, reason: str | None)
 def handle_yellow(message: dict, args: str) -> None:
     chat = message["chat"]
 
-    if chat.get("type") in GROUP_TYPES:
-        username = bot_username()
-        hint = f" — @{username}" if username else ""
-        tg.send_message(
-            chat["id"],
-            f"Карточки теперь выдаются в личке с ботом{hint}: напишите там {GIVE_COMMAND}, "
-            "выберите участника и при желании укажите причину.",
-            message["message_id"],
-        )
+    if chat.get("type") not in GROUP_TYPES:
+        start_give_flow(message["from"]["id"], chat["id"])
         return
 
-    start_give_flow(message["from"]["id"], chat["id"])
+    giver = message["from"]
+    reason = args.strip() or None
+    reply = message.get("reply_to_message")
+
+    if reply and "from" in reply:
+        target = reply["from"]
+        if target.get("is_bot"):
+            tg.send_message(chat["id"], "Ботам карточки не выдаются.", message["message_id"])
+            return
+        if target["id"] == giver["id"]:
+            tg.send_message(chat["id"], "Нельзя выдать карточку самому себе.", message["message_id"])
+            return
+
+        storage.remember_participant(chat["id"], target["id"], display_name(target))
+        finish_give(giver, chat["id"], chat["id"], target["id"], reason)
+        return
+
+    # No reply to point at someone: offer the same picker, right in the chat.
+    show_group_picker(chat["id"], giver, reason)
 
 
 def handle_cards(message: dict, args: str) -> None:
@@ -238,8 +291,10 @@ def handle_start(message: dict, args: str) -> None:
     tg.send_message(
         message["chat"]["id"],
         "Бот жёлтых/красных карточек.\n\n"
-        f"{GIVE_COMMAND} — выдать жёлтую карточку: в личке с ботом выберите участника "
-        "из списка и при желании укажите причину. Результат бот публикует в чате.\n"
+        f"{GIVE_COMMAND} — выдать жёлтую карточку. Способы:\n"
+        f"• в чате ответом на сообщение участника: {GIVE_COMMAND} [причина];\n"
+        f"• в чате без ответа: {GIVE_COMMAND} [причина] — бот покажет список участников;\n"
+        f"• в личке с ботом: {GIVE_COMMAND} — выбрать чат, участника и причину.\n"
         f"Выдавать карточки можно не чаще раза в {GIVE_COOLDOWN_SECONDS} секунд.\n"
         f"После {YELLOW_THRESHOLD}-й жёлтой карточки участник получает красную "
         f"и мутится в чате на {MUTE_SECONDS} секунд.\n\n"
@@ -272,11 +327,29 @@ def _handle_callback(callback: dict) -> None:
     dm_chat_id = message["chat"]["id"]
     message_id = message["message_id"]
 
+    state = storage.get_state(user["id"])
+
+    # A picker posted in a group is visible to everyone, so only the person who
+    # asked for it — the one holding the matching state — may use its buttons.
+    if data.startswith("gu:") or (data == "cancel" and message["chat"].get("type") in GROUP_TYPES):
+        if not state:
+            tg.answer_callback_query(callback["id"], "Это не ваша карточка.")
+            return
+
     tg.answer_callback_query(callback["id"])
 
     if data == "cancel":
         storage.clear_state(user["id"])
         tg.edit_message_text(dm_chat_id, message_id, "Отменено.")
+        return
+
+    if data.startswith("gu:"):
+        _, chat_id, target_id = data.split(":", 2)
+        target_name = storage.get_name(chat_id, target_id) or str(target_id)
+        tg.edit_message_text(
+            dm_chat_id, message_id, f"{display_name(user)} выдаёт карточку: {target_name}"
+        )
+        finish_give(user, chat_id, chat_id, target_id, state.get("reason"))
         return
 
     if data.startswith("chat:"):
@@ -295,7 +368,6 @@ def _handle_callback(callback: dict) -> None:
         return
 
     if data == "noreason":
-        state = storage.get_state(user["id"])
         if not state:
             tg.edit_message_text(
                 dm_chat_id, message_id, f"Выдача карточки устарела, начните заново: {GIVE_COMMAND}"
@@ -309,7 +381,7 @@ def _handle_private_text(message: dict) -> None:
     """A plain message in the bot's DM is the reason for a pending card."""
     user = message["from"]
     state = storage.get_state(user["id"])
-    if not state:
+    if not state or state.get("step") != "reason":
         return
 
     finish_give(user, message["chat"]["id"], state["chat_id"], state["target_id"], message["text"].strip())
