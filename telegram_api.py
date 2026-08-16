@@ -17,6 +17,8 @@ MUTE_PERMISSIONS = {
     "can_add_web_page_previews": False,
 }
 
+MEMBER_STATUSES = {"creator", "administrator", "member", "restricted"}
+
 
 def _call(method: str, **params) -> dict:
     token = os.environ["BOT_TOKEN"]
@@ -28,11 +30,27 @@ def _call(method: str, **params) -> dict:
     return data["result"]
 
 
-def send_message(chat_id, text: str, reply_to_message_id: int | None = None) -> dict:
+def send_message(chat_id, text: str, reply_to_message_id=None, reply_markup=None) -> dict:
     params = {"chat_id": chat_id, "text": text}
     if reply_to_message_id is not None:
         params["reply_to_message_id"] = reply_to_message_id
+    if reply_markup is not None:
+        params["reply_markup"] = reply_markup
     return _call("sendMessage", **params)
+
+
+def edit_message_text(chat_id, message_id, text: str, reply_markup=None) -> dict:
+    params = {"chat_id": chat_id, "message_id": message_id, "text": text}
+    if reply_markup is not None:
+        params["reply_markup"] = reply_markup
+    return _call("editMessageText", **params)
+
+
+def answer_callback_query(callback_query_id, text: str | None = None) -> dict:
+    params = {"callback_query_id": callback_query_id}
+    if text:
+        params["text"] = text
+    return _call("answerCallbackQuery", **params)
 
 
 def restrict_chat_member(chat_id, user_id, until_date: int) -> dict:
@@ -43,3 +61,15 @@ def restrict_chat_member(chat_id, user_id, until_date: int) -> dict:
         permissions=MUTE_PERMISSIONS,
         until_date=until_date,
     )
+
+
+def is_chat_member(chat_id, user_id) -> bool:
+    try:
+        member = _call("getChatMember", chat_id=chat_id, user_id=user_id)
+    except Exception:
+        return False
+    return member.get("status") in MEMBER_STATUSES
+
+
+def get_me() -> dict:
+    return _call("getMe")

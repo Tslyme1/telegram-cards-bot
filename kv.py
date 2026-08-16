@@ -46,3 +46,7 @@ def sadd(key: str, member: str):
 
 def smembers(key: str) -> list:
     return _request(["SMEMBERS", key]) or []
+
+
+def delete(key: str):
+    return _request(["DEL", key])
