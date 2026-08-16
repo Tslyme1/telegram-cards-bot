@@ -144,18 +144,6 @@ def _dispatch(update: dict) -> None:
         handler(message, rest)
 
 
-@app.post("/")
-@app.post("/api/webhook")
-def webhook():
-    secret = os.environ.get("WEBHOOK_SECRET")
-    if secret and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != secret:
-        return jsonify({"ok": False}), 401
-
-    update = request.get_json(force=True, silent=True) or {}
-    _dispatch(update)
-    return jsonify({"ok": True})
-
-
 def _check_kv() -> str:
     if "KV_REST_API_URL" not in os.environ or "KV_REST_API_TOKEN" not in os.environ:
         candidates = sorted(
@@ -174,9 +162,7 @@ def _check_kv() -> str:
     return "ok"
 
 
-@app.get("/")
-@app.get("/api/webhook")
-def health():
+def _health_response():
     return jsonify(
         {
             "ok": True,
@@ -185,3 +171,18 @@ def health():
             "kv": _check_kv(),
         }
     )
+
+
+@app.route("/", methods=["GET", "POST"])
+@app.route("/api/webhook", methods=["GET", "POST"])
+def webhook():
+    if request.method == "GET":
+        return _health_response()
+
+    secret = os.environ.get("WEBHOOK_SECRET")
+    if secret and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != secret:
+        return jsonify({"ok": False}), 401
+
+    update = request.get_json(force=True, silent=True) or {}
+    _dispatch(update)
+    return jsonify({"ok": True})
