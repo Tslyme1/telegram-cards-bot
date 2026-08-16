@@ -63,7 +63,7 @@ def start_give_flow(user_id, dm_chat_id) -> None:
         tg.send_message(
             dm_chat_id,
             "Я пока не знаю ни одного чата, где вы состоите.\n"
-            "Напишите что-нибудь в группе, где я работаю, и повторите /yellow.",
+            f"Напишите что-нибудь в группе, где я работаю, и повторите {GIVE_COMMAND}.",
         )
         return
 
@@ -186,7 +186,7 @@ def handle_yellow(message: dict, args: str) -> None:
         hint = f" — @{username}" if username else ""
         tg.send_message(
             chat["id"],
-            f"Карточки теперь выдаются в личке с ботом{hint}: напишите там /yellow, "
+            f"Карточки теперь выдаются в личке с ботом{hint}: напишите там {GIVE_COMMAND}, "
             "выберите участника и при желании укажите причину.",
             message["message_id"],
         )
@@ -238,16 +238,22 @@ def handle_start(message: dict, args: str) -> None:
     tg.send_message(
         message["chat"]["id"],
         "Бот жёлтых/красных карточек.\n\n"
-        "/yellow — выдать жёлтую карточку: в личке с ботом выберите участника "
+        f"{GIVE_COMMAND} — выдать жёлтую карточку: в личке с ботом выберите участника "
         "из списка и при желании укажите причину. Результат бот публикует в чате.\n"
         f"Выдавать карточки можно не чаще раза в {GIVE_COOLDOWN_SECONDS} секунд.\n"
         f"После {YELLOW_THRESHOLD}-й жёлтой карточки участник получает красную "
         f"и мутится в чате на {MUTE_SECONDS} секунд.\n\n"
-        "/cards — список карточек участников чата.",
+        f"{LIST_COMMAND} — список карточек участников чата.",
     )
 
 
+GIVE_COMMAND = "/card"
+LIST_COMMAND = "/kabany"
+
 COMMANDS = {
+    GIVE_COMMAND: handle_yellow,
+    LIST_COMMAND: handle_cards,
+    # Previous names, kept working as aliases.
     "/yellow": handle_yellow,
     "/cards": handle_cards,
     "/start": handle_start,
@@ -290,7 +296,9 @@ def _handle_callback(callback: dict) -> None:
     if data == "noreason":
         state = storage.get_state(user["id"])
         if not state:
-            tg.edit_message_text(dm_chat_id, message_id, "Выдача карточки устарела, начните заново: /yellow")
+            tg.edit_message_text(
+                dm_chat_id, message_id, f"Выдача карточки устарела, начните заново: {GIVE_COMMAND}"
+            )
             return
         tg.edit_message_text(dm_chat_id, message_id, "Карточка выдаётся без указания причины.")
         finish_give(user, dm_chat_id, state["chat_id"], state["target_id"], None)
