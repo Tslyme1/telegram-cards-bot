@@ -9,16 +9,13 @@ from telegram.error import BadRequest, Forbidden
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 import storage
+from config import GIVE_COOLDOWN_SECONDS, MUTE_SECONDS, YELLOW_THRESHOLD
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
-
-YELLOW_THRESHOLD = 6
-GIVE_COOLDOWN_SECONDS = 10
-MUTE_SECONDS = 30
 
 # In-memory per-giver cooldown: {(chat_id, giver_id): last_given_unix_ts}
 _last_given: dict[tuple[int, int], float] = {}
