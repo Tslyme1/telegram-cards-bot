@@ -71,5 +71,9 @@ def is_chat_member(chat_id, user_id) -> bool:
     return member.get("status") in MEMBER_STATUSES
 
 
+def get_chat_administrators(chat_id) -> list:
+    return _call("getChatAdministrators", chat_id=chat_id)
+
+
 def get_me() -> dict:
     return _call("getMe")

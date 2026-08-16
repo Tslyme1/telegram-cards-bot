@@ -48,9 +48,46 @@ def _remember(message: dict) -> None:
     storage.remember_chat(chat["id"], chat.get("title") or str(chat["id"]))
 
     seen = [message.get("from"), *message.get("new_chat_members", [])]
+    # Mentions carry the full user object, so they name people who never posted.
+    for entity in [*message.get("entities", []), *message.get("caption_entities", [])]:
+        if entity.get("type") == "text_mention" and entity.get("user"):
+            seen.append(entity["user"])
+
     for user in seen:
         if user and not user.get("is_bot"):
             storage.remember_participant(chat["id"], user["id"], display_name(user))
+
+
+def _remember_membership(event: dict) -> None:
+    """Record members from chat_member updates.
+
+    These arrive for every join/leave/status change - including people who
+    never write anything - but only if the webhook subscribes to them.
+    """
+    chat = event.get("chat") or {}
+    if chat.get("type") not in GROUP_TYPES:
+        return
+
+    storage.remember_chat(chat["id"], chat.get("title") or str(chat["id"]))
+
+    member = event.get("new_chat_member") or {}
+    user = member.get("user")
+    if not user or user.get("is_bot"):
+        return
+
+    if member.get("status") in tg.MEMBER_STATUSES:
+        storage.remember_participant(chat["id"], user["id"], display_name(user))
+
+
+def sync_administrators(chat_id) -> None:
+    """Pull in admins, who often never post but should still be listed."""
+    try:
+        for member in tg.get_chat_administrators(chat_id):
+            user = member.get("user") or {}
+            if user and not user.get("is_bot"):
+                storage.remember_participant(chat_id, user["id"], display_name(user))
+    except Exception:
+        app.logger.exception("Failed to sync administrators for %s", chat_id)
 
 
 # --- the card dialog, which runs in the bot's private chat -------------------
@@ -81,6 +118,7 @@ def start_give_flow(user_id, dm_chat_id) -> None:
 
 
 def ask_for_target(dm_chat_id, message_id, chat_id, giver_id=None) -> None:
+    sync_administrators(chat_id)
     participants = [
         (uid, name)
         for uid, name in storage.list_participants(chat_id)
@@ -181,6 +219,7 @@ def finish_give(giver: dict, ack_chat_id, chat_id, target_id, reason: str | None
 
 
 def show_group_picker(chat_id, giver: dict, reason: str | None) -> None:
+    sync_administrators(chat_id)
     participants = [
         (uid, name)
         for uid, name in storage.list_participants(chat_id)
@@ -391,6 +430,11 @@ def _dispatch(update: dict) -> None:
     if "callback_query" in update:
         _handle_callback(update["callback_query"])
         return
+
+    for key in ("chat_member", "my_chat_member"):
+        if key in update:
+            _remember_membership(update[key])
+            return
 
     message = update.get("message")
     if not message:
