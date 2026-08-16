@@ -248,7 +248,7 @@ def handle_start(message: dict, args: str) -> None:
 
 
 GIVE_COMMAND = "/card"
-LIST_COMMAND = "/kabany"
+LIST_COMMAND = "/list"
 
 COMMANDS = {
     GIVE_COMMAND: handle_yellow,
@@ -256,6 +256,7 @@ COMMANDS = {
     # Previous names, kept working as aliases.
     "/yellow": handle_yellow,
     "/cards": handle_cards,
+    "/kabany": handle_cards,
     "/start": handle_start,
     "/help": handle_start,
 }
