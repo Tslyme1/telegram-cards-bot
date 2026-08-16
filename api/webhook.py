@@ -156,7 +156,32 @@ def webhook():
     return jsonify({"ok": True})
 
 
+def _check_kv() -> str:
+    if "KV_REST_API_URL" not in os.environ or "KV_REST_API_TOKEN" not in os.environ:
+        candidates = sorted(
+            key
+            for key in os.environ
+            if any(fragment in key.upper() for fragment in ("REDIS", "KV", "UPSTASH"))
+        )
+        return (
+            "not configured: KV_REST_API_URL / KV_REST_API_TOKEN env vars are missing "
+            f"(similarly named env vars found: {candidates or 'none'})"
+        )
+    try:
+        kv.ttl("healthcheck")
+    except Exception as exc:  # noqa: BLE001 - surface any KV error to the diagnostic endpoint
+        return f"error: {exc}"
+    return "ok"
+
+
 @app.get("/")
 @app.get("/api/webhook")
 def health():
-    return jsonify({"ok": True, "service": "telegram-cards-bot"})
+    return jsonify(
+        {
+            "ok": True,
+            "service": "telegram-cards-bot",
+            "bot_token_set": "BOT_TOKEN" in os.environ,
+            "kv": _check_kv(),
+        }
+    )
