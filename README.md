@@ -75,9 +75,8 @@ python bot.py
 - `bot.py`, `storage.py`, `requirements-local.txt` — способ 1 (long polling +
   SQLite).
 - `api/webhook.py`, `storage_kv.py`, `kv.py`, `telegram_api.py`,
-  `pyproject.toml`, `requirements.txt` — способ 2 (Vercel webhook + Vercel
-  KV). `pyproject.toml` указывает Vercel точку входа (`api/webhook.py`,
-  переменная `app`); корневой `requirements.txt` — зависимости именно этой
-  функции (Flask, requests), чтобы Vercel не тянул тяжёлый
-  `python-telegram-bot`, который нужен только способу 1.
+  `pyproject.toml` — способ 2 (Vercel webhook + Vercel KV). `pyproject.toml`
+  задаёт и точку входа для Vercel (`api/webhook.py`, переменная `app`), и
+  зависимости именно этой функции (Flask, requests) — чтобы Vercel не тянул
+  тяжёлый `python-telegram-bot`, который нужен только способу 1.
 - `config.py` — общие настройки (порог карточек, кулдаун, длительность мута).
