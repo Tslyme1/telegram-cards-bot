@@ -30,7 +30,7 @@
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-local.txt
 
 export BOT_TOKEN=123456:your-telegram-bot-token
 python bot.py
@@ -72,7 +72,12 @@ python bot.py
 
 ## Структура проекта
 
-- `bot.py`, `storage.py` — способ 1 (long polling + SQLite).
-- `api/webhook.py`, `storage_kv.py`, `kv.py`, `telegram_api.py` — способ 2
-  (Vercel webhook + Vercel KV).
+- `bot.py`, `storage.py`, `requirements-local.txt` — способ 1 (long polling +
+  SQLite).
+- `api/webhook.py`, `storage_kv.py`, `kv.py`, `telegram_api.py`,
+  `pyproject.toml`, `requirements.txt` — способ 2 (Vercel webhook + Vercel
+  KV). `pyproject.toml` указывает Vercel точку входа (`api/webhook.py`,
+  переменная `app`); корневой `requirements.txt` — зависимости именно этой
+  функции (Flask, requests), чтобы Vercel не тянул тяжёлый
+  `python-telegram-bot`, который нужен только способу 1.
 - `config.py` — общие настройки (порог карточек, кулдаун, длительность мута).
