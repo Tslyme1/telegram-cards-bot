@@ -50,7 +50,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"и мутится в чате на {MUTE_SECONDS} секунд.\n"
         "/cards — список карточек участников чата.\n\n"
         "Чтобы мут работал, добавьте бота в чат администратором с правом "
-        "«Ограничивать участников»."
+        "«Блокировка пользователей»."
     )
 
 
@@ -115,7 +115,7 @@ async def give_yellow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await message.reply_text(
                 f"🟥 {display_name(target)} получает красную карточку (всего красных: {red}), "
                 "но заглушить не удалось — дайте боту права администратора "
-                f"с разрешением «Ограничивать участников» (и убедитесь, что цель не админ).{reason_suffix}"
+                f"с правом «Блокировка пользователей» (и убедитесь, что цель не админ).{reason_suffix}"
             )
     else:
         await message.reply_text(
