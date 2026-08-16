@@ -46,8 +46,9 @@ def display_name(user) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Бот жёлтых/красных карточек.\n\n"
-        f"/yellow — ответом на сообщение участника выдать ему жёлтую карточку "
-        f"(не чаще раза в {GIVE_COOLDOWN_SECONDS} секунд с одного аккаунта).\n"
+        f"/yellow [причина] — ответом на сообщение участника выдать ему жёлтую карточку, "
+        f"причину указывать необязательно (не чаще раза в {GIVE_COOLDOWN_SECONDS} секунд "
+        f"с одного аккаунта).\n"
         f"После {YELLOW_THRESHOLD}-й жёлтой карточки участник получает красную "
         f"и мутится в чате на {MUTE_SECONDS} секунд.\n"
         "/cards — список карточек участников чата.\n\n"
@@ -93,6 +94,9 @@ async def give_yellow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     _last_given[key] = now
 
+    reason = " ".join(context.args).strip() if context.args else None
+    reason_suffix = f"\nПричина: {reason}" if reason else ""
+
     yellow, red = storage.add_yellow_card(chat.id, target.id, display_name(target), YELLOW_THRESHOLD)
 
     if yellow == 0 and red > 0:
@@ -107,18 +111,18 @@ async def give_yellow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             await message.reply_text(
                 f"🟥 {display_name(target)} получает красную карточку (всего красных: {red}) "
-                f"и заглушен в чате на {MUTE_SECONDS} секунд."
+                f"и заглушен в чате на {MUTE_SECONDS} секунд.{reason_suffix}"
             )
         except (BadRequest, Forbidden) as exc:
             logger.warning("Failed to mute %s in chat %s: %s", target.id, chat.id, exc)
             await message.reply_text(
                 f"🟥 {display_name(target)} получает красную карточку (всего красных: {red}), "
                 "но заглушить не удалось — дайте боту права администратора "
-                "с разрешением «Ограничивать участников» (и убедитесь, что цель не админ)."
+                f"с разрешением «Ограничивать участников» (и убедитесь, что цель не админ).{reason_suffix}"
             )
     else:
         await message.reply_text(
-            f"🟨 {display_name(target)} получает жёлтую карточку ({yellow}/{YELLOW_THRESHOLD})."
+            f"🟨 {display_name(target)} получает жёлтую карточку ({yellow}/{YELLOW_THRESHOLD}).{reason_suffix}"
         )
 
 
