@@ -9,7 +9,11 @@ from telegram.error import BadRequest, Forbidden
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 import storage
-from config import GIVE_COOLDOWN_SECONDS, MUTE_SECONDS, YELLOW_THRESHOLD
+from config import GIVE_COOLDOWN_SECONDS, MUTE_LADDER_SECONDS, YELLOW_THRESHOLD
+
+# This local variant has no per-day state, so it always uses the first
+# step of the mute ladder rather than escalating.
+MUTE_SECONDS = MUTE_LADDER_SECONDS[0]
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",

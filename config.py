@@ -1,3 +1,9 @@
-YELLOW_THRESHOLD = 6
-GIVE_COOLDOWN_SECONDS = 10
-MUTE_SECONDS = 30
+YELLOW_THRESHOLD = 3
+GIVE_COOLDOWN_SECONDS = 15
+
+# Each red card earned the same day mutes for longer than the previous one;
+# once the ladder runs out, the last step repeats.
+MUTE_LADDER_SECONDS = [60, 5 * 60, 15 * 60, 30 * 60, 60 * 60]
+
+# The ladder starts over at midnight in this timezone (UTC+3 — Москва).
+DAY_RESET_UTC_OFFSET_HOURS = 3

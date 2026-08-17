@@ -84,6 +84,20 @@ def list_cards(chat_id) -> list[tuple[str, int, int]]:
     return rows
 
 
+def next_mute_seconds(chat_id, user_id, day_key: str, ladder: list[int]) -> tuple[int, int]:
+    """Count today's red cards for someone and return how long to mute them.
+
+    The counter is stored per day, so the ladder starts over every day on its
+    own — no scheduled cleanup needed.
+
+    Returns (mute_seconds, red_cards_today).
+    """
+    key = f"{_key('mutes', chat_id, user_id)}:{day_key}"
+    count = kv.incr(key)
+    kv.expire(key, 2 * 24 * 60 * 60)
+    return ladder[min(count, len(ladder)) - 1], count
+
+
 def set_state(user_id, state: dict) -> None:
     kv.set(_key("state", user_id), json.dumps(state), ex=STATE_TTL_SECONDS)
 

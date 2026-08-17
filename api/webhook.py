@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -9,7 +10,12 @@ from flask import Flask, jsonify, request  # noqa: E402
 import kv  # noqa: E402
 import storage_kv as storage  # noqa: E402
 import telegram_api as tg  # noqa: E402
-from config import GIVE_COOLDOWN_SECONDS, MUTE_SECONDS, YELLOW_THRESHOLD  # noqa: E402
+from config import (  # noqa: E402
+    DAY_RESET_UTC_OFFSET_HOURS,
+    GIVE_COOLDOWN_SECONDS,
+    MUTE_LADDER_SECONDS,
+    YELLOW_THRESHOLD,
+)
 
 app = Flask(__name__)
 
@@ -28,6 +34,30 @@ def display_name(user: dict) -> str:
 
 def cooldown_key(chat_id, giver_id) -> str:
     return f"cooldown:{chat_id}:{giver_id}"
+
+
+def current_day_key() -> str:
+    """Today's date in the timezone where the mute ladder resets."""
+    tz = timezone(timedelta(hours=DAY_RESET_UTC_OFFSET_HOURS))
+    return datetime.now(tz).date().isoformat()
+
+
+def _plural(count: int, one: str, few: str, many: str) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        return one
+    if 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
+        return few
+    return many
+
+
+def format_duration(seconds: int) -> str:
+    if seconds >= 3600 and seconds % 3600 == 0:
+        hours = seconds // 3600
+        return f"{hours} {_plural(hours, 'час', 'часа', 'часов')}"
+    if seconds >= 60:
+        minutes = seconds // 60
+        return f"{minutes} {_plural(minutes, 'минуту', 'минуты', 'минут')}"
+    return f"{seconds} {_plural(seconds, 'секунду', 'секунды', 'секунд')}"
 
 
 def bot_username() -> str:
@@ -193,13 +223,19 @@ def finish_give(giver: dict, ack_chat_id, chat_id, target_id, reason: str | None
         details += f"\nПричина: {reason}"
 
     if yellow == 0 and red > 0:
-        until = int(time.time()) + MUTE_SECONDS
+        mute_seconds, reds_today = storage.next_mute_seconds(
+            chat_id, target_id, current_day_key(), MUTE_LADDER_SECONDS
+        )
+        if reds_today > 1:
+            details = f"\nКрасная карточка №{reds_today} за сегодня{details}"
+
+        until = int(time.time()) + mute_seconds
         try:
             tg.restrict_chat_member(chat_id, target_id, until)
             tg.send_message(
                 chat_id,
                 f"🟥 {target_name} получает красную карточку (всего красных: {red}) "
-                f"и заглушен в чате на {MUTE_SECONDS} секунд.{details}",
+                f"и заглушен в чате на {format_duration(mute_seconds)}.{details}",
             )
         except Exception:
             tg.send_message(
@@ -333,9 +369,12 @@ def handle_start(message: dict, args: str) -> None:
         f"• в чате ответом на сообщение участника: {GIVE_COMMAND} [причина];\n"
         f"• в чате без ответа: {GIVE_COMMAND} [причина] — бот покажет список участников;\n"
         f"• в личке с ботом: {GIVE_COMMAND} — выбрать чат, участника и причину.\n"
-        f"Выдавать карточки можно не чаще раза в {GIVE_COOLDOWN_SECONDS} секунд.\n"
+        f"Выдавать карточки можно не чаще раза в {GIVE_COOLDOWN_SECONDS} секунд.\n\n"
         f"После {YELLOW_THRESHOLD}-й жёлтой карточки участник получает красную "
-        f"и мутится в чате на {MUTE_SECONDS} секунд.\n\n"
+        "и мутится в чате. Каждая следующая красная карточка за день мутит "
+        "дольше предыдущей: "
+        + ", ".join(format_duration(s) for s in MUTE_LADDER_SECONDS)
+        + ". Каждый день отсчёт начинается заново.\n\n"
         f"{LIST_COMMAND} — список карточек участников чата.",
     )
 

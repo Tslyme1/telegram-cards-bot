@@ -50,3 +50,7 @@ def smembers(key: str) -> list:
 
 def delete(key: str):
     return _request(["DEL", key])
+
+
+def expire(key: str, seconds: int):
+    return _request(["EXPIRE", key, str(seconds)])
