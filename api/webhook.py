@@ -23,6 +23,9 @@ GROUP_TYPES = ("group", "supergroup")
 
 CANCEL_BUTTON = {"text": "Отмена", "callback_data": "cancel"}
 
+CARD_NAME = {"yellow": "жёлтую", "green": "зелёную"}
+CARD_EMOJI = {"yellow": "🟨", "green": "🟩"}
+
 
 def display_name(user: dict) -> str:
     username = user.get("username")
@@ -32,8 +35,9 @@ def display_name(user: dict) -> str:
     return name or str(user["id"])
 
 
-def cooldown_key(chat_id, giver_id) -> str:
-    return f"cooldown:{chat_id}:{giver_id}"
+def cooldown_key(chat_id, giver_id, kind: str = "yellow") -> str:
+    # Separate per kind, so handing out a green card does not block a yellow one.
+    return f"cooldown:{kind}:{chat_id}:{giver_id}"
 
 
 def current_day_key() -> str:
@@ -123,31 +127,33 @@ def sync_administrators(chat_id) -> None:
 # --- the card dialog, which runs in the bot's private chat -------------------
 
 
-def start_give_flow(user_id, dm_chat_id) -> None:
+def start_give_flow(user_id, dm_chat_id, kind: str) -> None:
     chats = storage.list_user_chats(user_id)
 
     if not chats:
         tg.send_message(
             dm_chat_id,
             "Я пока не знаю ни одного чата, где вы состоите.\n"
-            f"Напишите что-нибудь в группе, где я работаю, и повторите {GIVE_COMMAND}.",
+            f"Напишите что-нибудь в группе, где я работаю, и повторите {COMMAND_FOR_KIND[kind]}.",
         )
         return
 
     if len(chats) == 1:
-        ask_for_target(dm_chat_id, None, chats[0][0], user_id)
+        ask_for_target(dm_chat_id, None, chats[0][0], user_id, kind)
         return
 
-    keyboard = [[{"text": title, "callback_data": f"chat:{chat_id}"}] for chat_id, title in chats]
+    keyboard = [
+        [{"text": title, "callback_data": f"chat:{kind}:{chat_id}"}] for chat_id, title in chats
+    ]
     keyboard.append([CANCEL_BUTTON])
     tg.send_message(
         dm_chat_id,
-        "В каком чате выдать карточку?",
+        f"В каком чате выдать {CARD_NAME[kind]} карточку?",
         reply_markup={"inline_keyboard": keyboard},
     )
 
 
-def ask_for_target(dm_chat_id, message_id, chat_id, giver_id=None) -> None:
+def ask_for_target(dm_chat_id, message_id, chat_id, giver_id=None, kind: str = "yellow") -> None:
     sync_administrators(chat_id)
     participants = [
         (uid, name)
@@ -162,10 +168,13 @@ def ask_for_target(dm_chat_id, message_id, chat_id, giver_id=None) -> None:
         )
         keyboard = None
     else:
-        text = "Кому выдать жёлтую карточку?"
+        text = f"Кому выдать {CARD_NAME[kind]} карточку?"
         keyboard = {
             "inline_keyboard": [
-                *[[{"text": name, "callback_data": f"user:{chat_id}:{uid}"}] for uid, name in participants],
+                *[
+                    [{"text": name, "callback_data": f"user:{kind}:{chat_id}:{uid}"}]
+                    for uid, name in participants
+                ],
                 [CANCEL_BUTTON],
             ]
         }
@@ -176,9 +185,15 @@ def ask_for_target(dm_chat_id, message_id, chat_id, giver_id=None) -> None:
         tg.edit_message_text(dm_chat_id, message_id, text, reply_markup=keyboard)
 
 
-def ask_for_reason(dm_chat_id, message_id, chat_id, target_id, giver_id) -> None:
+def ask_for_reason(dm_chat_id, message_id, chat_id, target_id, giver_id, kind: str) -> None:
     storage.set_state(
-        giver_id, {"step": "reason", "chat_id": str(chat_id), "target_id": str(target_id)}
+        giver_id,
+        {
+            "step": "reason",
+            "kind": kind,
+            "chat_id": str(chat_id),
+            "target_id": str(target_id),
+        },
     )
 
     target_name = storage.get_name(chat_id, target_id) or str(target_id)
@@ -191,13 +206,15 @@ def ask_for_reason(dm_chat_id, message_id, chat_id, target_id, giver_id) -> None
     tg.edit_message_text(
         dm_chat_id,
         message_id,
-        f"Кому: {target_name}\n\nОтправьте причину сообщением "
+        f"{CARD_EMOJI[kind]} Кому: {target_name}\n\nОтправьте причину сообщением "
         "или нажмите «Без причины».",
         reply_markup=keyboard,
     )
 
 
-def finish_give(giver: dict, ack_chat_id, chat_id, target_id, reason: str | None) -> None:
+def finish_give(
+    giver: dict, ack_chat_id, chat_id, target_id, reason: str | None, kind: str = "yellow"
+) -> None:
     """Award the card in `chat_id`; progress and errors go to `ack_chat_id`."""
     storage.clear_state(giver["id"])
 
@@ -209,18 +226,32 @@ def finish_give(giver: dict, ack_chat_id, chat_id, target_id, reason: str | None
         tg.send_message(ack_chat_id, "Вы больше не состоите в этом чате — карточка не выдана.")
         return
 
-    key = cooldown_key(chat_id, giver["id"])
+    key = cooldown_key(chat_id, giver["id"], kind)
     remaining = kv.ttl(key)
     if remaining > 0:
         tg.send_message(ack_chat_id, f"Подождите ещё {remaining} сек. перед следующей карточкой.")
         return
     kv.set(key, "1", ex=GIVE_COOLDOWN_SECONDS)
 
-    yellow, red = storage.add_yellow_card(chat_id, target_id, target_name, YELLOW_THRESHOLD)
-
     details = f"\nВыдал: {giver_name}"
     if reason:
         details += f"\nПричина: {reason}"
+
+    if kind == "green":
+        _give_green(chat_id, ack_chat_id, target_id, target_name, details, given_from_group)
+        return
+
+    if storage.take_immunity(chat_id, target_id):
+        tg.send_message(
+            chat_id,
+            f"🟩 У {target_name} была зелёная карточка — она сгорела, "
+            f"жёлтая не засчитана.{details}",
+        )
+        if not given_from_group:
+            tg.send_message(ack_chat_id, f"{target_name} использовал зелёную карточку.")
+        return
+
+    yellow, red = storage.add_yellow_card(chat_id, target_id, target_name, YELLOW_THRESHOLD)
 
     if yellow == 0 and red > 0:
         mute_seconds, reds_today = storage.next_mute_seconds(
@@ -255,7 +286,31 @@ def finish_give(giver: dict, ack_chat_id, chat_id, target_id, reason: str | None
         tg.send_message(ack_chat_id, f"Готово, карточка выдана: {target_name}.")
 
 
-def show_group_picker(chat_id, giver: dict, reason: str | None) -> None:
+def _give_green(chat_id, ack_chat_id, target_id, target_name, details, given_from_group) -> None:
+    outcome, yellow = storage.give_green_card(chat_id, target_id, target_name)
+
+    if outcome == "yellow_removed":
+        text = (
+            f"🟩 {target_name} получает зелёную карточку — "
+            f"снята одна жёлтая ({yellow}/{YELLOW_THRESHOLD}).{details}"
+        )
+    elif outcome == "immunity_granted":
+        text = (
+            f"🟩 {target_name} получает зелёную карточку — "
+            f"снимать нечего, она сработает как иммунитет на одну жёлтую.{details}"
+        )
+    else:
+        text = (
+            f"🟩 У {target_name} уже есть неиспользованная зелёная карточка — "
+            f"они не суммируются.{details}"
+        )
+
+    tg.send_message(chat_id, text)
+    if not given_from_group:
+        tg.send_message(ack_chat_id, f"Готово, зелёная карточка: {target_name}.")
+
+
+def show_group_picker(chat_id, giver: dict, reason: str | None, kind: str = "yellow") -> None:
     sync_administrators(chat_id)
     participants = [
         (uid, name)
@@ -274,10 +329,11 @@ def show_group_picker(chat_id, giver: dict, reason: str | None) -> None:
     # The reason can be longer than callback_data allows, so it waits in the
     # state until the giver taps a name.
     storage.set_state(
-        giver["id"], {"step": "pick", "chat_id": str(chat_id), "reason": reason}
+        giver["id"],
+        {"step": "pick", "kind": kind, "chat_id": str(chat_id), "reason": reason},
     )
 
-    prompt = f"{display_name(giver)}, кому выдать жёлтую карточку?"
+    prompt = f"{display_name(giver)}, кому выдать {CARD_NAME[kind]} карточку?"
     if reason:
         prompt += f"\nПричина: {reason}"
 
@@ -286,7 +342,10 @@ def show_group_picker(chat_id, giver: dict, reason: str | None) -> None:
         prompt,
         reply_markup={
             "inline_keyboard": [
-                *[[{"text": name, "callback_data": f"gu:{chat_id}:{uid}"}] for uid, name in participants],
+                *[
+                    [{"text": name, "callback_data": f"gu:{kind}:{chat_id}:{uid}"}]
+                    for uid, name in participants
+                ],
                 [CANCEL_BUTTON],
             ]
         },
@@ -296,11 +355,11 @@ def show_group_picker(chat_id, giver: dict, reason: str | None) -> None:
 # --- commands ---------------------------------------------------------------
 
 
-def handle_yellow(message: dict, args: str) -> None:
+def handle_yellow(message: dict, args: str, kind: str = "yellow") -> None:
     chat = message["chat"]
 
     if chat.get("type") not in GROUP_TYPES:
-        start_give_flow(message["from"]["id"], chat["id"])
+        start_give_flow(message["from"]["id"], chat["id"], kind)
         return
 
     giver = message["from"]
@@ -317,11 +376,15 @@ def handle_yellow(message: dict, args: str) -> None:
             return
 
         storage.remember_participant(chat["id"], target["id"], display_name(target))
-        finish_give(giver, chat["id"], chat["id"], target["id"], reason)
+        finish_give(giver, chat["id"], chat["id"], target["id"], reason, kind)
         return
 
     # No reply to point at someone: offer the same picker, right in the chat.
-    show_group_picker(chat["id"], giver, reason)
+    show_group_picker(chat["id"], giver, reason, kind)
+
+
+def handle_green(message: dict, args: str) -> None:
+    handle_yellow(message, args, kind="green")
 
 
 def handle_cards(message: dict, args: str) -> None:
@@ -352,7 +415,10 @@ def send_cards_list(source_chat_id, target_chat_id, message_id) -> None:
     if not rows:
         text = "Пока никто не получал карточек."
     else:
-        entries = [f"{name}:\n🟨 {yellow} 🟥 {red}" for name, yellow, red in rows]
+        entries = [
+            f"{name}:\n🟨 {yellow} 🟥 {red}" + (" 🟩" if immunity else "")
+            for name, yellow, red, immunity in rows
+        ]
         text = "Карточки участников чата:\n\n" + "\n\n".join(entries)
 
     if message_id is None:
@@ -375,15 +441,23 @@ def handle_start(message: dict, args: str) -> None:
         "дольше предыдущей: "
         + ", ".join(format_duration(s) for s in MUTE_LADDER_SECONDS)
         + ". Каждый день отсчёт начинается заново.\n\n"
+        f"{GREEN_COMMAND} — выдать зелёную карточку теми же тремя способами. "
+        "Она снимает одну жёлтую, а если снимать нечего — остаётся иммунитетом "
+        "и погасит следующую жёлтую. Зелёные не суммируются: больше одной "
+        "неиспользованной не бывает.\n\n"
         f"{LIST_COMMAND} — список карточек участников чата.",
     )
 
 
 GIVE_COMMAND = "/card"
+GREEN_COMMAND = "/green"
 LIST_COMMAND = "/list"
+
+COMMAND_FOR_KIND = {"yellow": GIVE_COMMAND, "green": GREEN_COMMAND}
 
 COMMANDS = {
     GIVE_COMMAND: handle_yellow,
+    GREEN_COMMAND: handle_green,
     LIST_COMMAND: handle_cards,
     # Previous names, kept working as aliases.
     "/yellow": handle_yellow,
@@ -421,17 +495,19 @@ def _handle_callback(callback: dict) -> None:
         return
 
     if data.startswith("gu:"):
-        _, chat_id, target_id = data.split(":", 2)
+        _, kind, chat_id, target_id = data.split(":", 3)
         target_name = storage.get_name(chat_id, target_id) or str(target_id)
         tg.edit_message_text(
-            dm_chat_id, message_id, f"{display_name(user)} выдаёт карточку: {target_name}"
+            dm_chat_id,
+            message_id,
+            f"{display_name(user)} выдаёт {CARD_NAME[kind]} карточку: {target_name}",
         )
-        finish_give(user, chat_id, chat_id, target_id, state.get("reason"))
+        finish_give(user, chat_id, chat_id, target_id, state.get("reason"), kind)
         return
 
     if data.startswith("chat:"):
-        chat_id = data.split(":", 1)[1]
-        ask_for_target(dm_chat_id, message_id, chat_id, user["id"])
+        _, kind, chat_id = data.split(":", 2)
+        ask_for_target(dm_chat_id, message_id, chat_id, user["id"], kind)
         return
 
     if data.startswith("list:"):
@@ -440,8 +516,8 @@ def _handle_callback(callback: dict) -> None:
         return
 
     if data.startswith("user:"):
-        _, chat_id, target_id = data.split(":", 2)
-        ask_for_reason(dm_chat_id, message_id, chat_id, target_id, user["id"])
+        _, kind, chat_id, target_id = data.split(":", 3)
+        ask_for_reason(dm_chat_id, message_id, chat_id, target_id, user["id"], kind)
         return
 
     if data == "noreason":
@@ -451,7 +527,9 @@ def _handle_callback(callback: dict) -> None:
             )
             return
         tg.edit_message_text(dm_chat_id, message_id, "Карточка выдаётся без указания причины.")
-        finish_give(user, dm_chat_id, state["chat_id"], state["target_id"], None)
+        finish_give(
+            user, dm_chat_id, state["chat_id"], state["target_id"], None, state.get("kind", "yellow")
+        )
 
 
 def _handle_private_text(message: dict) -> None:
@@ -461,7 +539,14 @@ def _handle_private_text(message: dict) -> None:
     if not state or state.get("step") != "reason":
         return
 
-    finish_give(user, message["chat"]["id"], state["chat_id"], state["target_id"], message["text"].strip())
+    finish_give(
+        user,
+        message["chat"]["id"],
+        state["chat_id"],
+        state["target_id"],
+        message["text"].strip(),
+        state.get("kind", "yellow"),
+    )
 
 
 def _dispatch(update: dict) -> None:
