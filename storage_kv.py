@@ -71,14 +71,12 @@ def add_yellow_card(chat_id, user_id, display_name: str, threshold: int) -> tupl
     return yellow, red
 
 
-def give_green_card(chat_id, user_id, display_name: str) -> tuple[str, int]:
-    """Cancel one yellow card, or grant immunity against the next one.
+def give_green_card(chat_id, user_id, display_name: str, limit: int) -> tuple[str, int]:
+    """Cancel one yellow card, or bank a green one against future yellows.
 
-    Immunity does not stack: handing green cards to someone who is already
-    clean leaves them with the same single immunity.
-
-    Returns (outcome, yellow_count_after) where outcome is one of
-    "yellow_removed", "immunity_granted", "immunity_already".
+    Returns (outcome, count) where outcome is one of "yellow_removed" (count is
+    the remaining yellows), "green_banked" or "green_full" (count is how many
+    green cards the person now holds).
     """
     remember_participant(chat_id, user_id, display_name)
 
@@ -88,33 +86,41 @@ def give_green_card(chat_id, user_id, display_name: str) -> tuple[str, int]:
         kv.set(_key("yellow", chat_id, user_id), yellow)
         return "yellow_removed", yellow
 
-    if has_immunity(chat_id, user_id):
-        return "immunity_already", 0
+    stock = green_count(chat_id, user_id)
+    if stock >= limit:
+        return "green_full", stock
 
-    kv.set(_key("immunity", chat_id, user_id), 1)
-    return "immunity_granted", 0
-
-
-def has_immunity(chat_id, user_id) -> bool:
-    return kv.get(_key("immunity", chat_id, user_id)) == "1"
+    stock += 1
+    kv.set(_key("immunity", chat_id, user_id), stock)
+    return "green_banked", stock
 
 
-def take_immunity(chat_id, user_id) -> bool:
-    """Spend the immunity if there is one. Returns True if it absorbed a card."""
-    if not has_immunity(chat_id, user_id):
-        return False
-    kv.delete(_key("immunity", chat_id, user_id))
-    return True
+def green_count(chat_id, user_id) -> int:
+    return int(kv.get(_key("immunity", chat_id, user_id)) or 0)
 
 
-def list_cards(chat_id) -> list[tuple[str, int, int, bool]]:
+def take_green_card(chat_id, user_id) -> tuple[bool, int]:
+    """Spend one banked green card. Returns (spent, remaining)."""
+    stock = green_count(chat_id, user_id)
+    if stock <= 0:
+        return False, 0
+
+    stock -= 1
+    if stock:
+        kv.set(_key("immunity", chat_id, user_id), stock)
+    else:
+        kv.delete(_key("immunity", chat_id, user_id))
+    return True, stock
+
+
+def list_cards(chat_id) -> list[tuple[str, int, int, int]]:
     user_ids = kv.smembers(_key("users", chat_id))
     rows = []
     for uid in user_ids:
         name = kv.get(_key("name", chat_id, uid)) or str(uid)
         yellow = int(kv.get(_key("yellow", chat_id, uid)) or 0)
         red = int(kv.get(_key("red", chat_id, uid)) or 0)
-        rows.append((name, yellow, red, has_immunity(chat_id, uid)))
+        rows.append((name, yellow, red, green_count(chat_id, uid)))
 
     rows.sort(key=lambda row: (-row[2], -row[1], row[0].lower()))
     return rows

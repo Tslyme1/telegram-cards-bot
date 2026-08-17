@@ -14,6 +14,7 @@ from config import (  # noqa: E402
     DAY_RESET_UTC_OFFSET_HOURS,
     GIVE_COOLDOWN_SECONDS,
     GREEN_COOLDOWN_SECONDS,
+    GREEN_IMMUNITY_LIMIT,
     MUTE_LADDER_SECONDS,
     YELLOW_THRESHOLD,
 )
@@ -248,11 +249,13 @@ def finish_give(
         _give_green(chat_id, ack_chat_id, target_id, target_name, details, given_from_group)
         return
 
-    if storage.take_immunity(chat_id, target_id):
+    spent, greens_left = storage.take_green_card(chat_id, target_id)
+    if spent:
+        left = f" Зелёных осталось: {greens_left}." if greens_left else ""
         tg.send_message(
             chat_id,
-            f"🟩 У {target_name} была зелёная карточка — она сгорела, "
-            f"жёлтая не засчитана.{details}",
+            f"🟩 {target_name} тратит зелёную карточку — жёлтая не засчитана."
+            f"{left}{details}",
         )
         if not given_from_group:
             tg.send_message(ack_chat_id, f"{target_name} использовал зелёную карточку.")
@@ -294,22 +297,24 @@ def finish_give(
 
 
 def _give_green(chat_id, ack_chat_id, target_id, target_name, details, given_from_group) -> None:
-    outcome, yellow = storage.give_green_card(chat_id, target_id, target_name)
+    outcome, count = storage.give_green_card(
+        chat_id, target_id, target_name, GREEN_IMMUNITY_LIMIT
+    )
 
     if outcome == "yellow_removed":
         text = (
             f"🟩 {target_name} получает зелёную карточку — "
-            f"снята одна жёлтая ({yellow}/{YELLOW_THRESHOLD}).{details}"
+            f"снята одна жёлтая ({count}/{YELLOW_THRESHOLD}).{details}"
         )
-    elif outcome == "immunity_granted":
+    elif outcome == "green_banked":
         text = (
-            f"🟩 {target_name} получает зелёную карточку — "
-            f"снимать нечего, она сработает как иммунитет на одну жёлтую.{details}"
+            f"🟩 {target_name} получает зелёную карточку — снимать нечего, она "
+            f"погасит будущую жёлтую. В запасе: {count}/{GREEN_IMMUNITY_LIMIT}.{details}"
         )
     else:
         text = (
-            f"🟩 У {target_name} уже есть неиспользованная зелёная карточка — "
-            f"они не суммируются.{details}"
+            f"🟩 У {target_name} уже максимум зелёных карточек "
+            f"({GREEN_IMMUNITY_LIMIT}) — больше не накопить.{details}"
         )
 
     tg.send_message(chat_id, text)
@@ -423,8 +428,8 @@ def send_cards_list(source_chat_id, target_chat_id, message_id) -> None:
         text = "Пока никто не получал карточек."
     else:
         entries = [
-            f"{name}:\n🟨 {yellow} 🟥 {red}" + (" 🟩" if immunity else "")
-            for name, yellow, red, immunity in rows
+            f"{name}:\n🟨 {yellow} 🟥 {red}" + (f" 🟩 {green}" if green else "")
+            for name, yellow, red, green in rows
         ]
         text = "Карточки участников чата:\n\n" + "\n\n".join(entries)
 
@@ -449,10 +454,10 @@ def handle_start(message: dict, args: str) -> None:
         + ", ".join(format_duration(s) for s in MUTE_LADDER_SECONDS)
         + ". Каждый день отсчёт начинается заново.\n\n"
         f"{GREEN_COMMAND} — выдать зелёную карточку теми же тремя способами. "
-        "Она снимает одну жёлтую, а если снимать нечего — остаётся иммунитетом "
-        "и погасит следующую жёлтую. Зелёные не суммируются: больше одной "
-        "неиспользованной не бывает. Выдавать можно не чаще раза в "
-        f"{format_duration(GREEN_COOLDOWN_SECONDS)}.\n\n"
+        "Она снимает одну жёлтую, а если снимать нечего — копится про запас "
+        "и гасит будущие жёлтые, по одной за раз. Больше "
+        f"{GREEN_IMMUNITY_LIMIT} неиспользованных не накопить. Выдавать можно "
+        f"не чаще раза в {format_duration(GREEN_COOLDOWN_SECONDS)}.\n\n"
         f"{LIST_COMMAND} — список карточек участников чата.",
     )
 
