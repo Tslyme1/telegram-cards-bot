@@ -1,5 +1,6 @@
 YELLOW_THRESHOLD = 3
 GIVE_COOLDOWN_SECONDS = 15
+GREEN_COOLDOWN_SECONDS = 60
 
 # Each red card earned the same day mutes for longer than the previous one;
 # once the ladder runs out, the last step repeats.

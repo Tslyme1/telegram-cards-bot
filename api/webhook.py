@@ -13,6 +13,7 @@ import telegram_api as tg  # noqa: E402
 from config import (  # noqa: E402
     DAY_RESET_UTC_OFFSET_HOURS,
     GIVE_COOLDOWN_SECONDS,
+    GREEN_COOLDOWN_SECONDS,
     MUTE_LADDER_SECONDS,
     YELLOW_THRESHOLD,
 )
@@ -24,7 +25,9 @@ GROUP_TYPES = ("group", "supergroup")
 CANCEL_BUTTON = {"text": "Отмена", "callback_data": "cancel"}
 
 CARD_NAME = {"yellow": "жёлтую", "green": "зелёную"}
+CARD_NAME_INSTRUMENTAL = {"yellow": "жёлтой", "green": "зелёной"}
 CARD_EMOJI = {"yellow": "🟨", "green": "🟩"}
+COOLDOWN_FOR_KIND = {"yellow": GIVE_COOLDOWN_SECONDS, "green": GREEN_COOLDOWN_SECONDS}
 
 
 def display_name(user: dict) -> str:
@@ -229,9 +232,13 @@ def finish_give(
     key = cooldown_key(chat_id, giver["id"], kind)
     remaining = kv.ttl(key)
     if remaining > 0:
-        tg.send_message(ack_chat_id, f"Подождите ещё {remaining} сек. перед следующей карточкой.")
+        tg.send_message(
+            ack_chat_id,
+            f"Подождите ещё {format_duration(remaining)} перед следующей "
+            f"{CARD_NAME_INSTRUMENTAL[kind]} карточкой.",
+        )
         return
-    kv.set(key, "1", ex=GIVE_COOLDOWN_SECONDS)
+    kv.set(key, "1", ex=COOLDOWN_FOR_KIND[kind])
 
     details = f"\nВыдал: {giver_name}"
     if reason:
@@ -435,7 +442,7 @@ def handle_start(message: dict, args: str) -> None:
         f"• в чате ответом на сообщение участника: {GIVE_COMMAND} [причина];\n"
         f"• в чате без ответа: {GIVE_COMMAND} [причина] — бот покажет список участников;\n"
         f"• в личке с ботом: {GIVE_COMMAND} — выбрать чат, участника и причину.\n"
-        f"Выдавать карточки можно не чаще раза в {GIVE_COOLDOWN_SECONDS} секунд.\n\n"
+        f"Выдавать можно не чаще раза в {format_duration(GIVE_COOLDOWN_SECONDS)}.\n\n"
         f"После {YELLOW_THRESHOLD}-й жёлтой карточки участник получает красную "
         "и мутится в чате. Каждая следующая красная карточка за день мутит "
         "дольше предыдущей: "
@@ -444,7 +451,8 @@ def handle_start(message: dict, args: str) -> None:
         f"{GREEN_COMMAND} — выдать зелёную карточку теми же тремя способами. "
         "Она снимает одну жёлтую, а если снимать нечего — остаётся иммунитетом "
         "и погасит следующую жёлтую. Зелёные не суммируются: больше одной "
-        "неиспользованной не бывает.\n\n"
+        "неиспользованной не бывает. Выдавать можно не чаще раза в "
+        f"{format_duration(GREEN_COOLDOWN_SECONDS)}.\n\n"
         f"{LIST_COMMAND} — список карточек участников чата.",
     )
 
