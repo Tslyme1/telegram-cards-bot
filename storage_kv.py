@@ -150,19 +150,6 @@ def next_mute_seconds(chat_id, user_id, day_key: str, ladder: list[int]) -> tupl
     return ladder[min(count, len(ladder)) - 1], count
 
 
-def set_session(session_id: str, data: dict) -> None:
-    kv.set(f"session:{session_id}", json.dumps(data), ex=STATE_TTL_SECONDS)
-
-
-def get_session(session_id: str) -> dict | None:
-    raw = kv.get(f"session:{session_id}")
-    return json.loads(raw) if raw else None
-
-
-def clear_session(session_id: str) -> None:
-    kv.delete(f"session:{session_id}")
-
-
 def set_state(user_id, state: dict) -> None:
     kv.set(_key("state", user_id), json.dumps(state), ex=STATE_TTL_SECONDS)
 

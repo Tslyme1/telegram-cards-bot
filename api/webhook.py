@@ -1,7 +1,6 @@
 import itertools
 import os
 import random
-import secrets
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -13,8 +12,6 @@ from flask import Flask, jsonify, request  # noqa: E402
 import kv  # noqa: E402
 import storage_kv as storage  # noqa: E402
 import telegram_api as tg  # noqa: E402
-import webapp_auth  # noqa: E402
-from webapp_page import PAGE  # noqa: E402
 from config import (  # noqa: E402
     CASINO_COOLDOWN_SECONDS,
     CASINO_LOSING_COMBOS,
@@ -39,22 +36,6 @@ CANCEL_BUTTON = {"text": "Отмена", "callback_data": "cancel"}
 CARD_NAME = {"yellow": "жёлтую", "green": "зелёную", "casino": "случайную"}
 CARD_NAME_NOMINATIVE = {"yellow": "жёлтая", "green": "зелёная", "red": "красная"}
 CARD_EMOJI = {"yellow": "🟨", "green": "🟩", "red": "🟥", "casino": "🎰"}
-
-MINI_APP_PROMPT = {
-    "yellow": "меню открыто только для вас:",
-    "green": "меню открыто только для вас:",
-    "casino": "автомат готов, крутите:",
-}
-MINI_APP_TITLE = {
-    "yellow": "Кому выдать жёлтую карточку?",
-    "green": "Кому выдать зелёную карточку?",
-    "casino": "Кого отправить в казино?",
-}
-MINI_APP_BUTTON = {
-    "yellow": "🟨 Выдать жёлтую",
-    "green": "🟩 Выдать зелёную",
-    "casino": "🎰 Крутить",
-}
 
 COOLDOWN_SUBJECT = {
     "yellow": "жёлтой карточкой",
@@ -172,72 +153,6 @@ def sync_administrators(chat_id) -> None:
         app.logger.exception("Failed to sync administrators for %s", chat_id)
 
 
-def mini_app_url() -> str:
-    """Base link of the Mini App, e.g. https://t.me/mybot/cards. Empty if unset."""
-    return os.environ.get("MINI_APP_URL", "").strip()
-
-
-def open_mini_app(giver: dict, chat_id, kind: str, reason, target_id=None) -> bool:
-    """Post a link that opens the menu privately for the caller.
-
-    A group message with an inline keyboard is visible to everyone, and
-    Telegram allows web_app buttons only in private chats — so the group gets a
-    plain link button and the menu itself lives inside the Mini App, which only
-    the person who taps it can see.
-    """
-    base = mini_app_url()
-    if not base:
-        return False
-
-    session_id = secrets.token_urlsafe(9)
-    session = {
-        "caller_id": giver["id"],
-        "chat_id": str(chat_id),
-        "kind": kind,
-        "reason": reason,
-    }
-    if target_id is not None:
-        session["target_id"] = str(target_id)
-    if kind == "casino":
-        symbols = random.sample(CASINO_SYMBOLS, CASINO_REEL_SYMBOLS)
-        every_combo = ["".join(c) for c in itertools.product(symbols, repeat=CASINO_SLOTS)]
-        session["symbols"] = symbols
-        session["losing"] = random.sample(every_combo, CASINO_LOSING_COMBOS)
-
-    storage.set_session(session_id, session)
-
-    tg.send_message(
-        chat_id,
-        f"{display_name(giver)}, {MINI_APP_PROMPT[kind]}",
-        reply_markup={
-            "inline_keyboard": [
-                [{"text": MINI_APP_BUTTON[kind], "url": f"{base}?startapp={session_id}"}]
-            ]
-        },
-    )
-    return True
-
-
-def send_menu(giver: dict, group_chat_id, text: str, keyboard=None):
-    """Put a menu in front of one person only.
-
-    Telegram has no per-user message inside a group, so menus always go to the
-    caller's private chat; only results are posted to the group. If the bot
-    cannot write to them, say so in the group instead.
-    """
-    try:
-        return tg.send_message(giver["id"], text, reply_markup=keyboard)
-    except Exception:
-        username = bot_username()
-        hint = f" — @{username}" if username else ""
-        tg.send_message(
-            group_chat_id,
-            f"{display_name(giver)}, меню я присылаю в личные сообщения. "
-            f"Напишите мне в личку{hint}, нажмите «Старт» и повторите команду.",
-        )
-        return None
-
-
 # --- the card dialog, which runs in the bot's private chat -------------------
 
 
@@ -352,8 +267,7 @@ def finish_give(
     kv.set(key, "1", ex=COOLDOWN_FOR_KIND[kind])
 
     if kind == "casino":
-        if not open_mini_app(giver, chat_id, kind, reason, target_id):
-            start_slots(giver, chat_id, target_id, target_name, reason)
+        start_slots(giver, chat_id, target_id, target_name, reason)
         return
 
     apply_card(
@@ -445,11 +359,10 @@ def slots_keyboard(symbols: list[str]) -> dict:
     }
 
 
-def slots_text(giver_name: str, target_name: str, symbols: list[str], picked: list[str]) -> str:
+def slots_text(giver_name: str, target_name: str, picked: list[str]) -> str:
     reels = " ".join(picked + ["⬜"] * (CASINO_SLOTS - len(picked)))
     return (
-        f"🎰 {giver_name} крутит казино на {target_name}\n"
-        f"Барабаны этой прокрутки: {' '.join(symbols)}\n\n"
+        f"🎰 {giver_name} крутит казино на {target_name}\n\n"
         f"{reels}\n\n"
         f"Символ {len(picked) + 1} из {CASINO_SLOTS} — выбирайте."
     )
@@ -462,14 +375,11 @@ def start_slots(giver: dict, chat_id, target_id, target_name, reason) -> None:
     symbols = random.sample(CASINO_SYMBOLS, CASINO_REEL_SYMBOLS)
     every_combo = ["".join(c) for c in itertools.product(symbols, repeat=CASINO_SLOTS)]
 
-    sent = send_menu(
-        giver,
+    tg.send_message(
         chat_id,
-        slots_text(giver_name, target_name, symbols, []),
-        slots_keyboard(symbols),
+        slots_text(giver_name, target_name, []),
+        reply_markup=slots_keyboard(symbols),
     )
-    if sent is None:
-        return
 
     storage.set_state(
         giver["id"],
@@ -502,7 +412,7 @@ def pick_slot_symbol(giver: dict, state: dict, dm_chat_id, message_id, symbol_in
         tg.edit_message_text(
             dm_chat_id,
             message_id,
-            slots_text(giver_name, target_name, symbols, picked),
+            slots_text(giver_name, target_name, picked),
             reply_markup=slots_keyboard(symbols),
         )
         return
@@ -515,13 +425,8 @@ def resolve_slots(
 ) -> None:
     storage.clear_state(giver["id"])
 
-    backfired = "".join(picked) in state["losing"]
-    tg.edit_message_text(
-        ack_chat_id,
-        message_id,
-        f"🎰 {' '.join(picked)}\n"
-        + ("Осечка — красная ваша." if backfired else "Мимо. Результат ушёл в чат."),
-    )
+    # The outcome follows as its own message, so the machine just stops here.
+    tg.edit_message_text(ack_chat_id, message_id, f"🎰 {' '.join(picked)}")
     resolve_spin(giver, state, picked, chat_id, target_id, target_name)
 
 
@@ -640,7 +545,11 @@ def _give_green(
 
 
 def show_group_picker(chat_id, giver: dict, reason: str | None, kind: str = "yellow") -> None:
-    """Offer the chat's participants to the caller — privately, in their DM."""
+    """Offer the chat's participants right in the chat.
+
+    Everyone sees the keyboard — Telegram has no per-user message in a group —
+    but only the person who asked for it can use the buttons.
+    """
     sync_administrators(chat_id)
     participants = [
         (uid, name)
@@ -656,18 +565,14 @@ def show_group_picker(chat_id, giver: dict, reason: str | None, kind: str = "yel
         )
         return
 
-    title = storage.list_user_chats(giver["id"])
-    chat_title = next((t for c, t in title if str(c) == str(chat_id)), str(chat_id))
-
-    prompt = f"Чат: {chat_title}\nКому выдать {CARD_NAME[kind]} карточку?"
+    prompt = f"{display_name(giver)}, кому выдать {CARD_NAME[kind]} карточку?"
     if reason:
         prompt += f"\nПричина: {reason}"
 
-    sent = send_menu(
-        giver,
+    tg.send_message(
         chat_id,
         prompt,
-        {
+        reply_markup={
             "inline_keyboard": [
                 *[
                     [{"text": name, "callback_data": f"gu:{kind}:{chat_id}:{uid}"}]
@@ -677,8 +582,6 @@ def show_group_picker(chat_id, giver: dict, reason: str | None, kind: str = "yel
             ]
         },
     )
-    if sent is None:
-        return
 
     # The reason can be longer than callback_data allows, so it waits in the
     # state until the giver taps a name.
@@ -715,9 +618,7 @@ def handle_yellow(message: dict, args: str, kind: str = "yellow") -> None:
         finish_give(giver, chat["id"], chat["id"], target["id"], reason, kind)
         return
 
-    # No reply to point at someone: offer a picker only this person can see.
-    if open_mini_app(giver, chat["id"], kind, reason):
-        return
+    # No reply to point at someone: offer the picker in the chat itself.
     show_group_picker(chat["id"], giver, reason, kind)
 
 
@@ -796,7 +697,7 @@ def handle_start(message: dict, args: str) -> None:
         "участник получает карточку случайного цвета, красная выпадает реже "
         "остальных. Крутить можно раз в "
         f"{format_duration(CASINO_COOLDOWN_SECONDS)}.\n\n"
-        "Все меню бот присылает в личку — в чате видно только результат.\n\n"
+        "Кнопки меню в чате работают только у того, кто вызвал команду.\n\n"
         f"{LIST_COMMAND} — список карточек участников чата.",
     )
 
@@ -919,113 +820,6 @@ def _handle_private_text(message: dict) -> None:
         message["text"].strip(),
         state.get("kind", "yellow"),
     )
-
-
-# --- the Mini App, which shows the menu to one person inside a group --------
-
-
-def _session_for_request(payload: dict):
-    """Resolve the caller's session, refusing anyone else's.
-
-    Returns (session, user, session_id, error).
-    """
-    init_data = webapp_auth.verify(payload.get("initData", ""))
-    if not init_data:
-        return None, None, None, "Не удалось проверить подпись Telegram."
-
-    user = init_data.get("user") or {}
-    session_id = init_data.get("start_param", "")
-    session = storage.get_session(session_id) if session_id else None
-
-    if not session:
-        return None, None, None, "Сессия истекла. Вызовите команду заново."
-    if str(session["caller_id"]) != str(user.get("id")):
-        return None, None, None, "Это меню открыл другой участник."
-
-    return session, user, session_id, None
-
-
-@app.get("/app")
-def mini_app_page():
-    return PAGE, 200, {"Content-Type": "text/html; charset=utf-8"}
-
-
-@app.post("/app/data")
-def mini_app_data():
-    payload = request.get_json(force=True, silent=True) or {}
-    session, user, session_id, error = _session_for_request(payload)
-    if error:
-        return jsonify({"ok": False, "error": error})
-
-    chat_id = session["chat_id"]
-    kind = session["kind"]
-    response = {
-        "ok": True,
-        "kind": kind,
-        "title": MINI_APP_TITLE[kind],
-        "chat_title": storage.get_chat_title(chat_id),
-        "slots": CASINO_SLOTS,
-        "symbols": session.get("symbols", []),
-    }
-
-    if session.get("target_id"):
-        target_id = session["target_id"]
-        response["target"] = {
-            "id": target_id,
-            "name": storage.get_name(chat_id, target_id) or str(target_id),
-        }
-    else:
-        sync_administrators(chat_id)
-        response["participants"] = [
-            {"id": uid, "name": name}
-            for uid, name in storage.list_participants(chat_id)
-            if str(uid) != str(user["id"])
-        ]
-
-    return jsonify(response)
-
-
-@app.post("/app/act")
-def mini_app_act():
-    payload = request.get_json(force=True, silent=True) or {}
-    session, user, session_id, error = _session_for_request(payload)
-    if error:
-        return jsonify({"ok": False, "error": error})
-
-    chat_id = session["chat_id"]
-    kind = session["kind"]
-    target_id = str(session.get("target_id") or payload.get("target_id") or "")
-    if not target_id or target_id == str(user["id"]):
-        return jsonify({"ok": False, "error": "Некого выбрать."})
-
-    target_name = storage.get_name(chat_id, target_id) or str(target_id)
-    reason = (payload.get("reason") or session.get("reason") or "").strip() or None
-
-    picked = []
-    if kind == "casino":
-        # The page could send anything, so only symbols from this spin's reels
-        # count — and a rejected combination must not burn the session.
-        picked = [s for s in payload.get("picked", []) if s in session.get("symbols", [])]
-        if len(picked) != CASINO_SLOTS:
-            return jsonify({"ok": False, "error": "Комбинация не собрана."})
-
-    # One session is one action.
-    storage.clear_session(session_id)
-
-    if kind == "casino":
-        resolve_spin(user, session, picked, chat_id, target_id, target_name)
-        return jsonify({"ok": True, "message": f"🎰 {' '.join(picked)} — результат в чате."})
-
-    apply_card(
-        display_name(user),
-        chat_id,
-        chat_id,
-        target_id,
-        target_name,
-        kind,
-        _details(display_name(user), reason),
-    )
-    return jsonify({"ok": True, "message": f"Готово: {target_name}"})
 
 
 def _dispatch(update: dict) -> None:
