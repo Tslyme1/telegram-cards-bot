@@ -12,6 +12,7 @@ import kv  # noqa: E402
 import storage_kv as storage  # noqa: E402
 import telegram_api as tg  # noqa: E402
 from config import (  # noqa: E402
+    CASINO_BACKFIRE_CHANCE,
     CASINO_COOLDOWN_SECONDS,
     CASINO_OUTCOMES,
     DAY_RESET_UTC_OFFSET_HOURS,
@@ -269,11 +270,23 @@ def finish_give(
     # when the outcome below it is about a different colour (a green card
     # absorbing a rolled yellow, say).
     header = ""
+    backfired = False
     if kind == "casino":
-        kind = random.choice(CASINO_OUTCOMES)
-        header = (
-            f"🎰 Казино: выпала {CARD_EMOJI[kind]} {CARD_NAME_NOMINATIVE[kind]} карточка\n"
-        )
+        if random.random() < CASINO_BACKFIRE_CHANCE:
+            # The spin turns on the spinner: the red card lands on them instead.
+            backfired = True
+            kind = "red"
+            target_id, target_name = giver["id"], giver_name
+            storage.remember_participant(chat_id, giver["id"], giver_name)
+            header = "🎰 Казино: осечка! 🟥 Красная карточка достаётся тому, кто крутил\n"
+            details = f"\nКрутил: {giver_name}"
+            if reason:
+                details += f"\nПричина: {reason}"
+        else:
+            kind = random.choice(CASINO_OUTCOMES)
+            header = (
+                f"🎰 Казино: выпала {CARD_EMOJI[kind]} {CARD_NAME_NOMINATIVE[kind]} карточка\n"
+            )
 
     if kind == "green":
         _give_green(
@@ -285,7 +298,12 @@ def finish_give(
         red = storage.add_red_card(chat_id, target_id, target_name)
         _award_red(chat_id, target_id, target_name, red, details, header)
         if not given_from_group:
-            tg.send_message(ack_chat_id, f"Готово, красная карточка: {target_name}.")
+            tg.send_message(
+                ack_chat_id,
+                "Осечка — красная карточка досталась вам."
+                if backfired
+                else f"Готово, красная карточка: {target_name}.",
+            )
         return
 
     spent, greens_left = storage.take_green_card(chat_id, target_id)
@@ -531,7 +549,9 @@ def handle_start(message: dict, args: str) -> None:
         f"{GREEN_IMMUNITY_LIMIT} неиспользованных не накопить. Выдавать можно "
         f"не чаще раза в {format_duration(GREEN_COOLDOWN_SECONDS)}.\n\n"
         f"{CASINO_COMMAND} — выдать участнику одну карточку случайного цвета: "
-        "зелёную, жёлтую или красную, с равными шансами. Крутить можно раз в "
+        "зелёную, жёлтую или красную, с равными шансами. Но с вероятностью "
+        f"{round(CASINO_BACKFIRE_CHANCE * 100)}% случается осечка — тогда "
+        "красную карточку получает тот, кто крутил. Крутить можно раз в "
         f"{format_duration(CASINO_COOLDOWN_SECONDS)}.\n\n"
         f"{LIST_COMMAND} — список карточек участников чата.",
     )
