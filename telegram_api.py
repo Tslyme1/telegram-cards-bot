@@ -63,12 +63,15 @@ def restrict_chat_member(chat_id, user_id, until_date: int) -> dict:
     )
 
 
-def is_chat_member(chat_id, user_id) -> bool:
+def get_chat_member_status(chat_id, user_id) -> str | None:
     try:
-        member = _call("getChatMember", chat_id=chat_id, user_id=user_id)
+        return _call("getChatMember", chat_id=chat_id, user_id=user_id).get("status")
     except Exception:
-        return False
-    return member.get("status") in MEMBER_STATUSES
+        return None
+
+
+def is_chat_member(chat_id, user_id) -> bool:
+    return get_chat_member_status(chat_id, user_id) in MEMBER_STATUSES
 
 
 def get_chat_administrators(chat_id) -> list:

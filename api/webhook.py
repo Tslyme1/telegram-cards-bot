@@ -319,10 +319,28 @@ def _award_red(chat_id, target_id, target_name, red: int, details: str) -> None:
         tg.send_message(
             chat_id,
             f"🟥 {target_name} получает красную карточку (всего красных: {red}), "
-            "но заглушить не удалось — дайте боту права администратора "
-            "с включённым правом «Блокировка пользователей» "
-            f"(и учтите: администратора чата бот заглушить не может).{details}",
+            f"но заглушить не удалось: {_mute_failure_reason(chat_id, target_id)}.{details}",
         )
+
+
+def _mute_failure_reason(chat_id, target_id) -> str:
+    """Explain a failed mute, since the usual advice does not fit every case."""
+    status = tg.get_chat_member_status(chat_id, target_id)
+
+    if status == "creator":
+        return (
+            "владельца чата не может ограничить никто, включая ботов — "
+            "это ограничение Telegram, правами оно не лечится"
+        )
+    if status == "administrator":
+        return (
+            "администратора чата бот заглушить не может — "
+            "снимите с него права администратора"
+        )
+    return (
+        "дайте боту права администратора с включённым правом "
+        "«Блокировка пользователей»"
+    )
 
 
 def _give_green(chat_id, ack_chat_id, target_id, target_name, details, given_from_group) -> None:
