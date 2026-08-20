@@ -6,7 +6,7 @@ GREEN_COOLDOWN_SECONDS = 60
 GREEN_IMMUNITY_LIMIT = 3
 
 # /casino hands out one card of a random colour, at most once an hour.
-CASINO_COOLDOWN_SECONDS = 60 * 60
+CASINO_COOLDOWN_SECONDS = 30 * 60
 CASINO_OUTCOMES = ["green", "yellow", "red"]
 
 # Each red card earned the same day mutes for longer than the previous one;
