@@ -1,4 +1,5 @@
 import os
+import random
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -11,6 +12,8 @@ import kv  # noqa: E402
 import storage_kv as storage  # noqa: E402
 import telegram_api as tg  # noqa: E402
 from config import (  # noqa: E402
+    CASINO_COOLDOWN_SECONDS,
+    CASINO_OUTCOMES,
     DAY_RESET_UTC_OFFSET_HOURS,
     GIVE_COOLDOWN_SECONDS,
     GREEN_COOLDOWN_SECONDS,
@@ -25,10 +28,20 @@ GROUP_TYPES = ("group", "supergroup")
 
 CANCEL_BUTTON = {"text": "Отмена", "callback_data": "cancel"}
 
-CARD_NAME = {"yellow": "жёлтую", "green": "зелёную"}
-CARD_NAME_INSTRUMENTAL = {"yellow": "жёлтой", "green": "зелёной"}
-CARD_EMOJI = {"yellow": "🟨", "green": "🟩"}
-COOLDOWN_FOR_KIND = {"yellow": GIVE_COOLDOWN_SECONDS, "green": GREEN_COOLDOWN_SECONDS}
+CARD_NAME = {"yellow": "жёлтую", "green": "зелёную", "casino": "случайную"}
+CARD_NAME_NOMINATIVE = {"yellow": "жёлтая", "green": "зелёная", "red": "красная"}
+CARD_EMOJI = {"yellow": "🟨", "green": "🟩", "casino": "🎰"}
+
+COOLDOWN_SUBJECT = {
+    "yellow": "жёлтой карточкой",
+    "green": "зелёной карточкой",
+    "casino": "прокруткой казино",
+}
+COOLDOWN_FOR_KIND = {
+    "yellow": GIVE_COOLDOWN_SECONDS,
+    "green": GREEN_COOLDOWN_SECONDS,
+    "casino": CASINO_COOLDOWN_SECONDS,
+}
 
 
 def display_name(user: dict) -> str:
@@ -236,7 +249,7 @@ def finish_give(
         tg.send_message(
             ack_chat_id,
             f"Подождите ещё {format_duration(remaining)} перед следующей "
-            f"{CARD_NAME_INSTRUMENTAL[kind]} карточкой.",
+            f"{COOLDOWN_SUBJECT[kind]}.",
         )
         return
     kv.set(key, "1", ex=COOLDOWN_FOR_KIND[kind])
@@ -245,8 +258,19 @@ def finish_give(
     if reason:
         details += f"\nПричина: {reason}"
 
+    if kind == "casino":
+        kind = random.choice(CASINO_OUTCOMES)
+        details = f"\n🎰 Казино: выпала {CARD_NAME_NOMINATIVE[kind]} карточка{details}"
+
     if kind == "green":
         _give_green(chat_id, ack_chat_id, target_id, target_name, details, given_from_group)
+        return
+
+    if kind == "red":
+        red = storage.add_red_card(chat_id, target_id, target_name)
+        _award_red(chat_id, target_id, target_name, red, details)
+        if not given_from_group:
+            tg.send_message(ack_chat_id, f"Готово, красная карточка: {target_name}.")
         return
 
     spent, greens_left = storage.take_green_card(chat_id, target_id)
@@ -264,28 +288,7 @@ def finish_give(
     yellow, red = storage.add_yellow_card(chat_id, target_id, target_name, YELLOW_THRESHOLD)
 
     if yellow == 0 and red > 0:
-        mute_seconds, reds_today = storage.next_mute_seconds(
-            chat_id, target_id, current_day_key(), MUTE_LADDER_SECONDS
-        )
-        if reds_today > 1:
-            details = f"\nКрасная карточка №{reds_today} за сегодня{details}"
-
-        until = int(time.time()) + mute_seconds
-        try:
-            tg.restrict_chat_member(chat_id, target_id, until)
-            tg.send_message(
-                chat_id,
-                f"🟥 {target_name} получает красную карточку (всего красных: {red}) "
-                f"и заглушен в чате на {format_duration(mute_seconds)}.{details}",
-            )
-        except Exception:
-            tg.send_message(
-                chat_id,
-                f"🟥 {target_name} получает красную карточку (всего красных: {red}), "
-                "но заглушить не удалось — дайте боту права администратора "
-                "с включённым правом «Блокировка пользователей» "
-                f"(и учтите: администратора чата бот заглушить не может).{details}",
-            )
+        _award_red(chat_id, target_id, target_name, red, details)
     else:
         tg.send_message(
             chat_id,
@@ -294,6 +297,32 @@ def finish_give(
 
     if not given_from_group:
         tg.send_message(ack_chat_id, f"Готово, карточка выдана: {target_name}.")
+
+
+def _award_red(chat_id, target_id, target_name, red: int, details: str) -> None:
+    """Announce a red card and mute for however long the day's ladder says."""
+    mute_seconds, reds_today = storage.next_mute_seconds(
+        chat_id, target_id, current_day_key(), MUTE_LADDER_SECONDS
+    )
+    if reds_today > 1:
+        details = f"\nКрасная карточка №{reds_today} за сегодня{details}"
+
+    until = int(time.time()) + mute_seconds
+    try:
+        tg.restrict_chat_member(chat_id, target_id, until)
+        tg.send_message(
+            chat_id,
+            f"🟥 {target_name} получает красную карточку (всего красных: {red}) "
+            f"и заглушен в чате на {format_duration(mute_seconds)}.{details}",
+        )
+    except Exception:
+        tg.send_message(
+            chat_id,
+            f"🟥 {target_name} получает красную карточку (всего красных: {red}), "
+            "но заглушить не удалось — дайте боту права администратора "
+            "с включённым правом «Блокировка пользователей» "
+            f"(и учтите: администратора чата бот заглушить не может).{details}",
+        )
 
 
 def _give_green(chat_id, ack_chat_id, target_id, target_name, details, given_from_group) -> None:
@@ -399,6 +428,10 @@ def handle_green(message: dict, args: str) -> None:
     handle_yellow(message, args, kind="green")
 
 
+def handle_casino(message: dict, args: str) -> None:
+    handle_yellow(message, args, kind="casino")
+
+
 def handle_cards(message: dict, args: str) -> None:
     chat = message["chat"]
 
@@ -458,19 +491,28 @@ def handle_start(message: dict, args: str) -> None:
         "и гасит будущие жёлтые, по одной за раз. Больше "
         f"{GREEN_IMMUNITY_LIMIT} неиспользованных не накопить. Выдавать можно "
         f"не чаще раза в {format_duration(GREEN_COOLDOWN_SECONDS)}.\n\n"
+        f"{CASINO_COMMAND} — выдать участнику одну карточку случайного цвета: "
+        "зелёную, жёлтую или красную, с равными шансами. Крутить можно раз в "
+        f"{format_duration(CASINO_COOLDOWN_SECONDS)}.\n\n"
         f"{LIST_COMMAND} — список карточек участников чата.",
     )
 
 
 GIVE_COMMAND = "/card"
 GREEN_COMMAND = "/green"
+CASINO_COMMAND = "/casino"
 LIST_COMMAND = "/list"
 
-COMMAND_FOR_KIND = {"yellow": GIVE_COMMAND, "green": GREEN_COMMAND}
+COMMAND_FOR_KIND = {
+    "yellow": GIVE_COMMAND,
+    "green": GREEN_COMMAND,
+    "casino": CASINO_COMMAND,
+}
 
 COMMANDS = {
     GIVE_COMMAND: handle_yellow,
     GREEN_COMMAND: handle_green,
+    CASINO_COMMAND: handle_casino,
     LIST_COMMAND: handle_cards,
     # Previous names, kept working as aliases.
     "/yellow": handle_yellow,

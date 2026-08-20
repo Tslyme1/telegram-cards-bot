@@ -95,6 +95,12 @@ def give_green_card(chat_id, user_id, display_name: str, limit: int) -> tuple[st
     return "green_banked", stock
 
 
+def add_red_card(chat_id, user_id, display_name: str) -> int:
+    """Award a red card directly, without going through the yellow threshold."""
+    remember_participant(chat_id, user_id, display_name)
+    return int(kv.incr(_key("red", chat_id, user_id)))
+
+
 def green_count(chat_id, user_id) -> int:
     return int(kv.get(_key("immunity", chat_id, user_id)) or 0)
 
