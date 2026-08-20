@@ -439,10 +439,14 @@ def resolve_spin(giver, session, picked, chat_id, target_id, target_name) -> Non
         f"🎰 {giver_name} крутит казино на {target_name}\n"
         f"Комбинация: {' '.join(picked)}\n"
     )
+    # The header already names the spinner, so the card line below carries only
+    # a reason, if one was given.
+    reason = session.get("reason")
+    details = f"\nПричина: {reason}" if reason else ""
 
     if backfired:
         storage.remember_participant(chat_id, giver["id"], giver_name)
-        header += "Осечка! 🟥 Красная карточка достаётся тому, кто крутил\n"
+        header += "Осечка!\n"
         apply_card(
             giver_name,
             chat_id,
@@ -450,7 +454,7 @@ def resolve_spin(giver, session, picked, chat_id, target_id, target_name) -> Non
             giver["id"],
             giver_name,
             "red",
-            _details(giver_name, session.get("reason"), "Крутил"),
+            details,
             header,
             backfired=True,
         )
@@ -459,7 +463,6 @@ def resolve_spin(giver, session, picked, chat_id, target_id, target_name) -> Non
     kind = random.choices(
         list(CASINO_OUTCOME_WEIGHTS), weights=list(CASINO_OUTCOME_WEIGHTS.values())
     )[0]
-    header += f"Мимо — выпала {CARD_EMOJI[kind]} {CARD_NAME_NOMINATIVE[kind]} карточка\n"
     apply_card(
         giver_name,
         chat_id,
@@ -467,7 +470,7 @@ def resolve_spin(giver, session, picked, chat_id, target_id, target_name) -> Non
         target_id,
         target_name,
         kind,
-        _details(giver_name, session.get("reason"), "Крутил"),
+        details,
         header,
     )
 
