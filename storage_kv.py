@@ -29,6 +29,10 @@ def remember_participant(chat_id, user_id, display_name: str) -> None:
     kv.sadd(_key("chats", user_id), str(chat_id))
 
 
+def get_chat_title(chat_id) -> str:
+    return kv.get(_key("chattitle", chat_id)) or str(chat_id)
+
+
 def get_name(chat_id, user_id) -> str | None:
     return kv.get(_key("name", chat_id, user_id))
 
@@ -144,6 +148,19 @@ def next_mute_seconds(chat_id, user_id, day_key: str, ladder: list[int]) -> tupl
     count = kv.incr(key)
     kv.expire(key, 2 * 24 * 60 * 60)
     return ladder[min(count, len(ladder)) - 1], count
+
+
+def set_session(session_id: str, data: dict) -> None:
+    kv.set(f"session:{session_id}", json.dumps(data), ex=STATE_TTL_SECONDS)
+
+
+def get_session(session_id: str) -> dict | None:
+    raw = kv.get(f"session:{session_id}")
+    return json.loads(raw) if raw else None
+
+
+def clear_session(session_id: str) -> None:
+    kv.delete(f"session:{session_id}")
 
 
 def set_state(user_id, state: dict) -> None:
