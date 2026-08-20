@@ -153,6 +153,21 @@ def sync_administrators(chat_id) -> None:
         app.logger.exception("Failed to sync administrators for %s", chat_id)
 
 
+def send_to_dm(giver: dict, group_chat_id, text: str, keyboard=None):
+    """Send something to one person privately, telling the group if we can't."""
+    try:
+        return tg.send_message(giver["id"], text, reply_markup=keyboard)
+    except Exception:
+        username = bot_username()
+        hint = f" — @{username}" if username else ""
+        tg.send_message(
+            group_chat_id,
+            f"{display_name(giver)}, автомат я открываю в личных сообщениях. "
+            f"Напишите мне в личку{hint}, нажмите «Старт» и повторите команду.",
+        )
+        return None
+
+
 # --- the card dialog, which runs in the bot's private chat -------------------
 
 
@@ -375,11 +390,16 @@ def start_slots(giver: dict, chat_id, target_id, target_name, reason) -> None:
     symbols = random.sample(CASINO_SYMBOLS, CASINO_REEL_SYMBOLS)
     every_combo = ["".join(c) for c in itertools.product(symbols, repeat=CASINO_SLOTS)]
 
-    tg.send_message(
+    # The machine itself goes to the spinner's private chat; only the outcome
+    # is announced in the group.
+    sent = send_to_dm(
+        giver,
         chat_id,
         slots_text(giver_name, target_name, []),
-        reply_markup=slots_keyboard(symbols),
+        slots_keyboard(symbols),
     )
+    if sent is None:
+        return
 
     storage.set_state(
         giver["id"],
@@ -390,8 +410,11 @@ def start_slots(giver: dict, chat_id, target_id, target_name, reason) -> None:
             "reason": reason,
             "symbols": symbols,
             "picked": [],
-            # Drawn per spin and revealed afterwards, so the odds stay honest
-            # even though the player picks the symbols by hand.
+            # Ties the state to this one machine, so taps on any other
+            # keyboard cannot be resolved against it.
+            "message_id": sent.get("message_id"),
+            # Drawn per spin and never revealed, so the odds stay honest even
+            # though the player picks the symbols by hand.
             "losing": random.sample(every_combo, CASINO_LOSING_COMBOS),
         },
     )
@@ -762,7 +785,8 @@ def _handle_callback(callback: dict) -> None:
         return
 
     if data.startswith("sl:"):
-        if state.get("step") != "slots":
+        # Only the machine this state was created for may be resolved by it.
+        if state.get("step") != "slots" or state.get("message_id") != message_id:
             tg.edit_message_text(
                 dm_chat_id, message_id, f"Прокрутка устарела, начните заново: {CASINO_COMMAND}"
             )
