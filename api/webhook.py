@@ -53,8 +53,15 @@ def display_name(user: dict) -> str:
 
 
 def cooldown_key(chat_id, giver_id, kind: str = "yellow") -> str:
-    # Separate per kind, so handing out a green card does not block a yellow one.
-    return f"cooldown:{kind}:{chat_id}:{giver_id}"
+    """Key for one person's cooldown on one kind of card.
+
+    Separate per kind, so handing out a green card does not block a yellow one.
+
+    The configured duration is part of the key on purpose: changing a cooldown
+    in config.py moves every waiter to a fresh key, so nobody stays stuck on a
+    countdown from the old setting. The stale keys expire on their own.
+    """
+    return f"cooldown:{kind}:{COOLDOWN_FOR_KIND[kind]}:{chat_id}:{giver_id}"
 
 
 def current_day_key() -> str:
