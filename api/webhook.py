@@ -13,6 +13,9 @@ import kv  # noqa: E402
 import storage_kv as storage  # noqa: E402
 import telegram_api as tg  # noqa: E402
 from config import (  # noqa: E402
+    CASINO_CARDS_SPIN_COST,
+    CASINO_COINS_BET_MAX,
+    CASINO_COINS_BET_MIN,
     CASINO_COOLDOWN_SECONDS,
     CASINO_LOSING_COMBOS,
     CASINO_OUTCOME_WEIGHTS,
@@ -23,6 +26,8 @@ from config import (  # noqa: E402
     GIVE_COOLDOWN_SECONDS,
     GREEN_COOLDOWN_SECONDS,
     GREEN_IMMUNITY_LIMIT,
+    KABANKOIN_DAILY_AMOUNT,
+    KABANKOIN_PAYOUT_TIERS,
     MUTE_LADDER_SECONDS,
     YELLOW_THRESHOLD,
 )
@@ -36,6 +41,8 @@ CANCEL_BUTTON = {"text": "Отмена", "callback_data": "cancel"}
 CARD_NAME = {"yellow": "жёлтую", "green": "зелёную", "casino": "случайную"}
 CARD_NAME_NOMINATIVE = {"yellow": "жёлтая", "green": "зелёная", "red": "красная"}
 CARD_EMOJI = {"yellow": "🟨", "green": "🟩", "red": "🟥", "casino": "🎰"}
+
+KABANKOIN_EMOJI = "🪙"
 
 COOLDOWN_SUBJECT = {
     "yellow": "жёлтой карточкой",
@@ -73,6 +80,34 @@ def current_day_key() -> str:
     """Today's date in the timezone where the mute ladder resets."""
     tz = timezone(timedelta(hours=DAY_RESET_UTC_OFFSET_HOURS))
     return datetime.now(tz).date().isoformat()
+
+
+def seconds_until_day_reset() -> int:
+    tz = timezone(timedelta(hours=DAY_RESET_UTC_OFFSET_HOURS))
+    now = datetime.now(tz)
+    midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return int((midnight - now).total_seconds())
+
+
+def get_kabankoins(chat_id, user_id) -> int:
+    return storage.get_kabankoins(chat_id, user_id, current_day_key(), KABANKOIN_DAILY_AMOUNT)
+
+
+def insufficient_balance_text(balance: int) -> str:
+    return (
+        f"{KABANKOIN_EMOJI} Не хватает кабанкоинов (баланс: {balance}). "
+        f"Обновится через {format_duration(seconds_until_day_reset())}."
+    )
+
+
+def roll_kabankoin_payout(bet: int) -> int:
+    """Pick a payout tier, weighted by bet, then roll a value inside it."""
+    span = CASINO_COINS_BET_MAX - CASINO_COINS_BET_MIN
+    t = (bet - CASINO_COINS_BET_MIN) / span if span else 0
+    tiers = [(lo, hi) for lo, hi, _, _ in KABANKOIN_PAYOUT_TIERS]
+    weights = [w_min + (w_max - w_min) * t for _, _, w_min, w_max in KABANKOIN_PAYOUT_TIERS]
+    lo, hi = random.choices(tiers, weights=weights)[0]
+    return random.randint(lo, hi)
 
 
 def _plural(count: int, one: str, few: str, many: str) -> str:
@@ -281,10 +316,6 @@ def finish_give(
         return
     kv.set(key, "1", ex=COOLDOWN_FOR_KIND[kind])
 
-    if kind == "casino":
-        start_slots(giver, chat_id, target_id, target_name, reason)
-        return
-
     apply_card(
         giver_name, ack_chat_id, chat_id, target_id, target_name, kind, _details(giver_name, reason)
     )
@@ -380,23 +411,29 @@ def slots_text(giver_name: str, target_name: str, picked: list[str]) -> str:
     )
 
 
-def start_slots(giver: dict, chat_id, target_id, target_name, reason) -> None:
+def begin_casino_cards(giver: dict, chat_id, target_id, reason, dm_chat_id, message_id) -> None:
+    """Spend the spin cost and open the slot machine, editing the picker in place."""
     giver_name = display_name(giver)
+    target_name = storage.get_name(chat_id, target_id) or str(target_id)
+
+    spent, balance = storage.spend_kabankoins(
+        chat_id, giver["id"], current_day_key(), CASINO_CARDS_SPIN_COST, KABANKOIN_DAILY_AMOUNT
+    )
+    if not spent:
+        tg.edit_message_text(dm_chat_id, message_id, insufficient_balance_text(balance))
+        storage.clear_state(giver["id"])
+        return
 
     # Each spin runs on its own reels, drawn from the full symbol set.
     symbols = random.sample(CASINO_SYMBOLS, CASINO_REEL_SYMBOLS)
     every_combo = ["".join(c) for c in itertools.product(symbols, repeat=CASINO_SLOTS)]
 
-    # The machine itself goes to the spinner's private chat; only the outcome
-    # is announced in the group.
-    sent = send_to_dm(
-        giver,
-        chat_id,
+    tg.edit_message_text(
+        dm_chat_id,
+        message_id,
         slots_text(giver_name, target_name, []),
-        slots_keyboard(symbols),
+        reply_markup=slots_keyboard(symbols),
     )
-    if sent is None:
-        return
 
     storage.set_state(
         giver["id"],
@@ -409,7 +446,7 @@ def start_slots(giver: dict, chat_id, target_id, target_name, reason) -> None:
             "picked": [],
             # Ties the state to this one machine, so taps on any other
             # keyboard cannot be resolved against it.
-            "message_id": sent.get("message_id"),
+            "message_id": message_id,
             # Drawn per spin and never revealed, so the odds stay honest even
             # though the player picks the symbols by hand.
             "losing": random.sample(every_combo, CASINO_LOSING_COMBOS),
@@ -623,6 +660,153 @@ def show_group_picker(chat_id, giver: dict, reason: str | None, kind: str = "yel
     )
 
 
+# --- /casino: type picker, then either the card slots above or the coin bet -
+
+
+def start_casino_flow(giver: dict, dm_chat_id, target_id=None, reason=None) -> None:
+    """Entry point for /casino: pick a chat first if the caller is in several."""
+    chats = storage.list_user_chats(giver["id"])
+    if not chats:
+        tg.send_message(
+            dm_chat_id,
+            "Я пока не знаю ни одного чата, где вы состоите.\n"
+            f"Напишите что-нибудь в группе, где я работаю, и повторите {CASINO_COMMAND}.",
+        )
+        return
+
+    if len(chats) == 1:
+        open_casino_type_picker(giver, dm_chat_id, chats[0][0], None, target_id, reason)
+        return
+
+    keyboard = [[{"text": title, "callback_data": f"cchat:{cid}"}] for cid, title in chats]
+    keyboard.append([CANCEL_BUTTON])
+    sent = tg.send_message(
+        dm_chat_id, "В каком чате играть в казино?", reply_markup={"inline_keyboard": keyboard}
+    )
+    storage.set_state(
+        giver["id"],
+        {"step": "casino_chat", "reason": reason, "message_id": sent.get("message_id")},
+    )
+
+
+def open_casino_type_picker(giver, dm_chat_id, chat_id, message_id, target_id, reason) -> None:
+    balance = get_kabankoins(chat_id, giver["id"])
+    text = (
+        f"{KABANKOIN_EMOJI} Баланс: {balance}/{KABANKOIN_DAILY_AMOUNT}\n"
+        "Какое казино крутим?"
+    )
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "🎴 Выдать карточку", "callback_data": "ctype:cards"}],
+            [{"text": f"{KABANKOIN_EMOJI} Испытать удачу", "callback_data": "ctype:coins"}],
+            [CANCEL_BUTTON],
+        ]
+    }
+
+    if message_id is None:
+        sent = send_to_dm(giver, chat_id, text, keyboard)
+        if sent is None:
+            return
+        message_id = sent.get("message_id")
+    else:
+        tg.edit_message_text(dm_chat_id, message_id, text, reply_markup=keyboard)
+
+    storage.set_state(
+        giver["id"],
+        {
+            "step": "casino_type",
+            "chat_id": str(chat_id),
+            "target_id": str(target_id) if target_id is not None else None,
+            "reason": reason,
+            "message_id": message_id,
+        },
+    )
+
+
+def show_casino_target_picker(giver_id, dm_chat_id, message_id, chat_id, reason) -> None:
+    sync_administrators(chat_id)
+    participants = [
+        (uid, name)
+        for uid, name in storage.list_participants(chat_id)
+        if str(uid) != str(giver_id)
+    ]
+
+    if not participants:
+        tg.edit_message_text(
+            dm_chat_id,
+            message_id,
+            "Я пока никого не видел в этом чате. Ответьте командой на сообщение "
+            "участника или подождите, пока участники что-нибудь напишут.",
+        )
+        storage.clear_state(giver_id)
+        return
+
+    tg.edit_message_text(
+        dm_chat_id,
+        message_id,
+        "На кого крутим?",
+        reply_markup={
+            "inline_keyboard": [
+                *[[{"text": name, "callback_data": f"cuser:{uid}"}] for uid, name in participants],
+                [CANCEL_BUTTON],
+            ]
+        },
+    )
+    storage.set_state(
+        giver_id,
+        {"step": "casino_pick", "chat_id": str(chat_id), "reason": reason, "message_id": message_id},
+    )
+
+
+def show_bet_picker(giver_id, dm_chat_id, message_id, chat_id, reason) -> None:
+    balance = get_kabankoins(chat_id, giver_id)
+    if balance < CASINO_COINS_BET_MIN:
+        tg.edit_message_text(dm_chat_id, message_id, insufficient_balance_text(balance))
+        storage.clear_state(giver_id)
+        return
+
+    max_bet = min(CASINO_COINS_BET_MAX, balance)
+    buttons = [
+        {"text": f"{n} {KABANKOIN_EMOJI}", "callback_data": f"cbet:{n}"}
+        for n in range(CASINO_COINS_BET_MIN, max_bet + 1)
+    ]
+    tg.edit_message_text(
+        dm_chat_id,
+        message_id,
+        f"{KABANKOIN_EMOJI} Баланс: {balance}\nВыберите ставку — больше ставка, выше шанс на крупный куш:",
+        reply_markup={"inline_keyboard": [buttons, [CANCEL_BUTTON]]},
+    )
+    storage.set_state(
+        giver_id,
+        {"step": "casino_bet", "chat_id": str(chat_id), "reason": reason, "message_id": message_id},
+    )
+
+
+def resolve_coin_spin(giver, dm_chat_id, message_id, chat_id, bet, reason) -> None:
+    storage.clear_state(giver["id"])
+    giver_name = display_name(giver)
+
+    spent, balance = storage.spend_kabankoins(
+        chat_id, giver["id"], current_day_key(), bet, KABANKOIN_DAILY_AMOUNT
+    )
+    if not spent:
+        tg.edit_message_text(dm_chat_id, message_id, insufficient_balance_text(balance))
+        return
+
+    payout = roll_kabankoin_payout(bet)
+    balance = storage.add_kabankoins(chat_id, giver["id"], current_day_key(), payout, KABANKOIN_DAILY_AMOUNT)
+
+    jackpot = " 🎉 ДЖЕКПОТ!" if payout == 100 else ""
+    tg.edit_message_text(dm_chat_id, message_id, f"{KABANKOIN_EMOJI} Выпало: {payout}{jackpot}")
+
+    details = f"\nПричина: {reason}" if reason else ""
+    tg.send_message(
+        chat_id,
+        f"{KABANKOIN_EMOJI} {giver_name} крутит кабанкоин-казино, ставка {bet} — "
+        f"выпадает {payout}{jackpot}\nБаланс: {balance} {KABANKOIN_EMOJI}{details}",
+    )
+
+
 # --- commands ---------------------------------------------------------------
 
 
@@ -659,7 +843,40 @@ def handle_green(message: dict, args: str) -> None:
 
 
 def handle_casino(message: dict, args: str) -> None:
-    handle_yellow(message, args, kind="casino")
+    chat = message["chat"]
+    giver = message["from"]
+
+    # Throttles the command itself, not any one chat's balance, so use the
+    # caller's own id as both halves of the key.
+    key = cooldown_key(giver["id"], giver["id"], "casino")
+    remaining = kv.ttl(key)
+    if remaining > 0:
+        tg.send_message(
+            chat["id"],
+            f"Подождите ещё {format_duration(remaining)} перед следующей "
+            f"{COOLDOWN_SUBJECT['casino']}.",
+            message["message_id"],
+        )
+        return
+    kv.set(key, "1", ex=COOLDOWN_FOR_KIND["casino"])
+
+    if chat.get("type") not in GROUP_TYPES:
+        start_casino_flow(giver, chat["id"])
+        return
+
+    reason = args.strip() or None
+    reply = message.get("reply_to_message")
+    target_id = None
+    if reply and "from" in reply:
+        target = reply["from"]
+        if target.get("is_bot"):
+            tg.send_message(chat["id"], "Ботам карточки не выдаются.", message["message_id"])
+            return
+        if target["id"] != giver["id"]:
+            target_id = target["id"]
+            storage.remember_participant(chat["id"], target_id, display_name(target))
+
+    open_casino_type_picker(giver, chat["id"], chat["id"], None, target_id, reason)
 
 
 def handle_cards(message: dict, args: str) -> None:
@@ -721,15 +938,21 @@ def handle_start(message: dict, args: str) -> None:
         "и гасит будущие жёлтые, по одной за раз. Больше "
         f"{GREEN_IMMUNITY_LIMIT} неиспользованных не накопить. Выдавать можно "
         f"не чаще раза в {format_duration(GREEN_COOLDOWN_SECONDS)}.\n\n"
-        f"{CASINO_COMMAND} — игровой автомат. Выберите участника; на каждую "
-        f"прокрутку берутся {CASINO_REEL_SYMBOLS} случайных символа из набора "
-        f"{' '.join(CASINO_SYMBOLS)}, из них вы собираете комбинацию длиной "
-        f"{CASINO_SLOTS}. Бот заранее прячет {CASINO_LOSING_COMBOS} проигрышные "
-        "комбинации: попали — осечка, красная карточка достаётся вам; мимо — "
-        "участник получает карточку случайного цвета, красная выпадает реже "
-        "остальных. Крутить можно раз в "
-        f"{format_duration(CASINO_COOLDOWN_SECONDS)}.\n\n"
-        "Кнопки меню в чате работают только у того, кто вызвал команду.\n\n"
+        f"{KABANKOIN_EMOJI} У каждого свои кабанкоины — {KABANKOIN_DAILY_AMOUNT} в день "
+        "на чат, обновляются каждую полночь. Тратятся на прокрутки казино.\n\n"
+        f"{CASINO_COMMAND} — казино, два типа на выбор:\n"
+        f"• 🎴 Карточное (1 {KABANKOIN_EMOJI} за прокрутку) — выберите участника, "
+        f"затем соберите комбинацию из {CASINO_SLOTS} символов, взятых на эту "
+        f"прокрутку из набора {' '.join(CASINO_SYMBOLS)}. Бот заранее прячет "
+        f"{CASINO_LOSING_COMBOS} проигрышные комбинации: попали — осечка, красная "
+        "карточка достаётся вам; мимо — участник получает карточку случайного "
+        "цвета, красная выпадает реже остальных.\n"
+        f"• {KABANKOIN_EMOJI} Кабанкоин — ставка от {CASINO_COINS_BET_MIN} до "
+        f"{CASINO_COINS_BET_MAX} {KABANKOIN_EMOJI}, выигрыш от 1 до 100 (100 — "
+        "джекпот). Чем больше ставка, тем выше шанс на крупный выигрыш.\n\n"
+        f"Команду можно вызвать не чаще раза в "
+        f"{format_duration(CASINO_COOLDOWN_SECONDS)}. Меню в обоих случаях "
+        "открывается в личке с ботом.\n\n"
         f"{LIST_COMMAND} — список карточек участников чата.",
     )
 
@@ -773,13 +996,13 @@ def _handle_callback(callback: dict) -> None:
 
     # A picker posted in a group is visible to everyone, so only the person who
     # asked for it — the one holding the matching state — may use its buttons.
-    needs_state = data.startswith(("gu:", "sl:")) or (
+    needs_state = data.startswith(("gu:", "sl:", "cchat:", "ctype:", "cuser:", "cbet:")) or (
         data == "cancel" and message["chat"].get("type") in GROUP_TYPES
     )
     if needs_state and not state:
         tg.answer_callback_query(
             callback["id"],
-            "Это не ваша прокрутка." if data.startswith("sl:") else "Это не ваша карточка.",
+            "Это не ваша прокрутка." if data.startswith(("sl:", "cbet:")) else "Это не ваша карточка.",
         )
         return
 
@@ -826,6 +1049,55 @@ def _handle_callback(callback: dict) -> None:
     if data.startswith("user:"):
         _, kind, chat_id, target_id = data.split(":", 3)
         ask_for_reason(dm_chat_id, message_id, chat_id, target_id, user["id"], kind)
+        return
+
+    if data.startswith("cchat:"):
+        if state.get("step") != "casino_chat" or state.get("message_id") != message_id:
+            tg.edit_message_text(
+                dm_chat_id, message_id, f"Устарело, начните заново: {CASINO_COMMAND}"
+            )
+            return
+        chat_id = data.split(":", 1)[1]
+        open_casino_type_picker(user, dm_chat_id, chat_id, message_id, None, state.get("reason"))
+        return
+
+    if data.startswith("ctype:"):
+        if state.get("step") != "casino_type" or state.get("message_id") != message_id:
+            tg.edit_message_text(
+                dm_chat_id, message_id, f"Устарело, начните заново: {CASINO_COMMAND}"
+            )
+            return
+        casino_type = data.split(":", 1)[1]
+        chat_id = state["chat_id"]
+        reason = state.get("reason")
+        if casino_type == "cards":
+            target_id = state.get("target_id")
+            if target_id:
+                begin_casino_cards(user, chat_id, target_id, reason, dm_chat_id, message_id)
+            else:
+                show_casino_target_picker(user["id"], dm_chat_id, message_id, chat_id, reason)
+        else:
+            show_bet_picker(user["id"], dm_chat_id, message_id, chat_id, reason)
+        return
+
+    if data.startswith("cuser:"):
+        if state.get("step") != "casino_pick" or state.get("message_id") != message_id:
+            tg.edit_message_text(
+                dm_chat_id, message_id, f"Устарело, начните заново: {CASINO_COMMAND}"
+            )
+            return
+        target_id = data.split(":", 1)[1]
+        begin_casino_cards(user, state["chat_id"], target_id, state.get("reason"), dm_chat_id, message_id)
+        return
+
+    if data.startswith("cbet:"):
+        if state.get("step") != "casino_bet" or state.get("message_id") != message_id:
+            tg.edit_message_text(
+                dm_chat_id, message_id, f"Устарело, начните заново: {CASINO_COMMAND}"
+            )
+            return
+        bet = int(data.split(":", 1)[1])
+        resolve_coin_spin(user, dm_chat_id, message_id, state["chat_id"], bet, state.get("reason"))
         return
 
     if data == "noreason":

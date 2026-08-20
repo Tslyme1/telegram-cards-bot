@@ -136,6 +136,27 @@ def list_cards(chat_id) -> list[tuple[str, int, int, int]]:
     return rows
 
 
+def get_kabankoins(chat_id, user_id, day_key: str, daily_amount: int) -> int:
+    raw = kv.get(_key(f"coins:{day_key}", chat_id, user_id))
+    return int(raw) if raw is not None else daily_amount
+
+
+def spend_kabankoins(chat_id, user_id, day_key: str, amount: int, daily_amount: int) -> tuple[bool, int]:
+    """Try to deduct `amount`. Returns (spent, balance_after)."""
+    balance = get_kabankoins(chat_id, user_id, day_key, daily_amount)
+    if balance < amount:
+        return False, balance
+    balance -= amount
+    kv.set(_key(f"coins:{day_key}", chat_id, user_id), balance, ex=2 * 24 * 60 * 60)
+    return True, balance
+
+
+def add_kabankoins(chat_id, user_id, day_key: str, amount: int, daily_amount: int) -> int:
+    balance = get_kabankoins(chat_id, user_id, day_key, daily_amount) + amount
+    kv.set(_key(f"coins:{day_key}", chat_id, user_id), balance, ex=2 * 24 * 60 * 60)
+    return balance
+
+
 def next_mute_seconds(chat_id, user_id, day_key: str, ladder: list[int]) -> tuple[int, int]:
     """Count today's red cards for someone and return how long to mute them.
 

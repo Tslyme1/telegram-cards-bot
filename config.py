@@ -21,6 +21,35 @@ CASINO_SLOTS = 3
 # 3 of the 27 combinations is a backfire chance of about 11%.
 CASINO_LOSING_COMBOS = 3
 
+# Kabankoins are a daily budget, not a wallet: everyone starts each day with
+# this many, spending them refills nothing until the next day (the balance is
+# stored per-day, like the mute ladder, so it resets on its own).
+KABANKOIN_DAILY_AMOUNT = 5
+
+# The card-casino spin (unchanged mechanic above) costs a flat coin.
+CASINO_CARDS_SPIN_COST = 1
+
+# The coin-casino spin's cost *is* the bet: betting more both costs more and
+# skews the payout odds toward the higher tiers below.
+CASINO_COINS_BET_MIN = 1
+CASINO_COINS_BET_MAX = 5
+
+# Payout tiers for the coin casino: (low, high, weight at minimum bet, weight
+# at maximum bet). Weights are interpolated by bet size and used with
+# random.choices, so they don't need to be normalised, but each column here
+# sums to 100 to make the percentages easy to read directly. Modelled on a
+# real slot machine's pay table: small wins are common, the jackpot (100) is
+# rare, and a bigger bet buys better odds at the bigger tiers without
+# touching the payout amounts themselves.
+KABANKOIN_PAYOUT_TIERS = [
+    (1, 10, 55, 20),
+    (11, 25, 27, 25),
+    (26, 50, 12, 25),
+    (51, 80, 5, 20),
+    (81, 99, 0.8, 8.5),
+    (100, 100, 0.2, 1.5),  # the jackpot
+]
+
 # Each red card earned the same day mutes for longer than the previous one;
 # once the ladder runs out, the last step repeats.
 MUTE_LADDER_SECONDS = [60, 5 * 60, 15 * 60, 30 * 60, 60 * 60]
