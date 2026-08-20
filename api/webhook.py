@@ -332,12 +332,9 @@ def apply_card(
     spent, greens_left = storage.take_green_card(chat_id, target_id)
     if spent:
         left = f" Зелёных осталось: {greens_left}." if greens_left else ""
-        # Only the card that was thrown gets a colour; the green being spent
-        # would otherwise compete with it for attention.
-        marker = "" if header else "🟨 "
         tg.send_message(
             chat_id,
-            f"{header}{marker}{target_name} тратит зелёную карточку — жёлтая не засчитана."
+            f"{header}🟨 {target_name} получает жёлтую карточку, тратится одна зелёная."
             f"{left}{details}",
         )
         if not given_from_group:
