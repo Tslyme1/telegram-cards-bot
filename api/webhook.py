@@ -15,7 +15,8 @@ import telegram_api as tg  # noqa: E402
 from config import (  # noqa: E402
     CASINO_COOLDOWN_SECONDS,
     CASINO_LOSING_COMBOS,
-    CASINO_OUTCOMES,
+    CASINO_OUTCOME_WEIGHTS,
+    CASINO_REEL_SYMBOLS,
     CASINO_SLOTS,
     CASINO_SYMBOLS,
     DAY_RESET_UTC_OFFSET_HOURS,
@@ -152,6 +153,26 @@ def sync_administrators(chat_id) -> None:
         app.logger.exception("Failed to sync administrators for %s", chat_id)
 
 
+def send_menu(giver: dict, group_chat_id, text: str, keyboard=None):
+    """Put a menu in front of one person only.
+
+    Telegram has no per-user message inside a group, so menus always go to the
+    caller's private chat; only results are posted to the group. If the bot
+    cannot write to them, say so in the group instead.
+    """
+    try:
+        return tg.send_message(giver["id"], text, reply_markup=keyboard)
+    except Exception:
+        username = bot_username()
+        hint = f" — @{username}" if username else ""
+        tg.send_message(
+            group_chat_id,
+            f"{display_name(giver)}, меню я присылаю в личные сообщения. "
+            f"Напишите мне в личку{hint}, нажмите «Старт» и повторите команду.",
+        )
+        return None
+
+
 # --- the card dialog, which runs in the bot's private chat -------------------
 
 
@@ -266,7 +287,7 @@ def finish_give(
     kv.set(key, "1", ex=COOLDOWN_FOR_KIND[kind])
 
     if kind == "casino":
-        start_slots(giver, ack_chat_id, chat_id, target_id, target_name, reason)
+        start_slots(giver, chat_id, target_id, target_name, reason)
         return
 
     apply_card(
@@ -346,30 +367,43 @@ def apply_card(
 # --- the slot machine behind /casino ----------------------------------------
 
 
-def slots_keyboard() -> dict:
+def slots_keyboard(symbols: list[str]) -> dict:
     return {
         "inline_keyboard": [
             [
                 {"text": symbol, "callback_data": f"sl:{index}"}
-                for index, symbol in enumerate(CASINO_SYMBOLS)
+                for index, symbol in enumerate(symbols)
             ],
             [CANCEL_BUTTON],
         ]
     }
 
 
-def slots_text(giver_name: str, target_name: str, picked: list[str]) -> str:
+def slots_text(giver_name: str, target_name: str, symbols: list[str], picked: list[str]) -> str:
     reels = " ".join(picked + ["⬜"] * (CASINO_SLOTS - len(picked)))
     return (
-        f"🎰 {giver_name} крутит казино на {target_name}\n\n"
+        f"🎰 {giver_name} крутит казино на {target_name}\n"
+        f"Барабаны этой прокрутки: {' '.join(symbols)}\n\n"
         f"{reels}\n\n"
         f"Символ {len(picked) + 1} из {CASINO_SLOTS} — выбирайте."
     )
 
 
-def start_slots(giver: dict, ack_chat_id, chat_id, target_id, target_name, reason) -> None:
+def start_slots(giver: dict, chat_id, target_id, target_name, reason) -> None:
     giver_name = display_name(giver)
-    every_combo = ["".join(c) for c in itertools.product(CASINO_SYMBOLS, repeat=CASINO_SLOTS)]
+
+    # Each spin runs on its own reels, drawn from the full symbol set.
+    symbols = random.sample(CASINO_SYMBOLS, CASINO_REEL_SYMBOLS)
+    every_combo = ["".join(c) for c in itertools.product(symbols, repeat=CASINO_SLOTS)]
+
+    sent = send_menu(
+        giver,
+        chat_id,
+        slots_text(giver_name, target_name, symbols, []),
+        slots_keyboard(symbols),
+    )
+    if sent is None:
+        return
 
     storage.set_state(
         giver["id"],
@@ -378,17 +412,12 @@ def start_slots(giver: dict, ack_chat_id, chat_id, target_id, target_name, reaso
             "chat_id": str(chat_id),
             "target_id": str(target_id),
             "reason": reason,
+            "symbols": symbols,
             "picked": [],
             # Drawn per spin and revealed afterwards, so the odds stay honest
             # even though the player picks the symbols by hand.
             "losing": random.sample(every_combo, CASINO_LOSING_COMBOS),
         },
-    )
-
-    tg.send_message(
-        ack_chat_id,
-        slots_text(giver_name, target_name, []),
-        reply_markup=slots_keyboard(),
     )
 
 
@@ -397,8 +426,9 @@ def pick_slot_symbol(giver: dict, state: dict, dm_chat_id, message_id, symbol_in
     chat_id = state["chat_id"]
     target_id = state["target_id"]
     target_name = storage.get_name(chat_id, target_id) or str(target_id)
+    symbols = state["symbols"]
 
-    picked = state["picked"] + [CASINO_SYMBOLS[symbol_index]]
+    picked = state["picked"] + [symbols[symbol_index]]
 
     if len(picked) < CASINO_SLOTS:
         state["picked"] = picked
@@ -406,8 +436,8 @@ def pick_slot_symbol(giver: dict, state: dict, dm_chat_id, message_id, symbol_in
         tg.edit_message_text(
             dm_chat_id,
             message_id,
-            slots_text(giver_name, target_name, picked),
-            reply_markup=slots_keyboard(),
+            slots_text(giver_name, target_name, symbols, picked),
+            reply_markup=slots_keyboard(symbols),
         )
         return
 
@@ -424,7 +454,12 @@ def resolve_slots(
     losing = state["losing"]
     backfired = combo in losing
 
-    tg.edit_message_text(ack_chat_id, message_id, f"🎰 {giver_name}: {' '.join(picked)}")
+    tg.edit_message_text(
+        ack_chat_id,
+        message_id,
+        f"🎰 {' '.join(picked)}\n"
+        + ("Осечка — красная ваша." if backfired else "Мимо. Результат ушёл в чат."),
+    )
 
     header = (
         f"🎰 {giver_name} крутит казино на {target_name}\n"
@@ -437,7 +472,7 @@ def resolve_slots(
         header += "Осечка! 🟥 Красная карточка достаётся тому, кто крутил\n"
         apply_card(
             giver_name,
-            ack_chat_id,
+            chat_id,
             chat_id,
             giver["id"],
             giver_name,
@@ -448,11 +483,13 @@ def resolve_slots(
         )
         return
 
-    kind = random.choice(CASINO_OUTCOMES)
+    kind = random.choices(
+        list(CASINO_OUTCOME_WEIGHTS), weights=list(CASINO_OUTCOME_WEIGHTS.values())
+    )[0]
     header += f"Мимо — выпала {CARD_EMOJI[kind]} {CARD_NAME_NOMINATIVE[kind]} карточка\n"
     apply_card(
         giver_name,
-        ack_chat_id,
+        chat_id,
         chat_id,
         target_id,
         target_name,
@@ -535,6 +572,7 @@ def _give_green(
 
 
 def show_group_picker(chat_id, giver: dict, reason: str | None, kind: str = "yellow") -> None:
+    """Offer the chat's participants to the caller — privately, in their DM."""
     sync_administrators(chat_id)
     participants = [
         (uid, name)
@@ -550,21 +588,18 @@ def show_group_picker(chat_id, giver: dict, reason: str | None, kind: str = "yel
         )
         return
 
-    # The reason can be longer than callback_data allows, so it waits in the
-    # state until the giver taps a name.
-    storage.set_state(
-        giver["id"],
-        {"step": "pick", "kind": kind, "chat_id": str(chat_id), "reason": reason},
-    )
+    title = storage.list_user_chats(giver["id"])
+    chat_title = next((t for c, t in title if str(c) == str(chat_id)), str(chat_id))
 
-    prompt = f"{display_name(giver)}, кому выдать {CARD_NAME[kind]} карточку?"
+    prompt = f"Чат: {chat_title}\nКому выдать {CARD_NAME[kind]} карточку?"
     if reason:
         prompt += f"\nПричина: {reason}"
 
-    tg.send_message(
+    sent = send_menu(
+        giver,
         chat_id,
         prompt,
-        reply_markup={
+        {
             "inline_keyboard": [
                 *[
                     [{"text": name, "callback_data": f"gu:{kind}:{chat_id}:{uid}"}]
@@ -573,6 +608,15 @@ def show_group_picker(chat_id, giver: dict, reason: str | None, kind: str = "yel
                 [CANCEL_BUTTON],
             ]
         },
+    )
+    if sent is None:
+        return
+
+    # The reason can be longer than callback_data allows, so it waits in the
+    # state until the giver taps a name.
+    storage.set_state(
+        giver["id"],
+        {"step": "pick", "kind": kind, "chat_id": str(chat_id), "reason": reason},
     )
 
 
@@ -674,12 +718,15 @@ def handle_start(message: dict, args: str) -> None:
         "и гасит будущие жёлтые, по одной за раз. Больше "
         f"{GREEN_IMMUNITY_LIMIT} неиспользованных не накопить. Выдавать можно "
         f"не чаще раза в {format_duration(GREEN_COOLDOWN_SECONDS)}.\n\n"
-        f"{CASINO_COMMAND} — игровой автомат. Выберите участника, затем "
-        f"соберите комбинацию из {CASINO_SLOTS} символов ({' '.join(CASINO_SYMBOLS)}) — "
-        f"бот заранее прячет {CASINO_LOSING_COMBOS} проигрышные. Попали в одну "
-        "из них — осечка, красная карточка достаётся вам; мимо — участник "
-        "получает карточку случайного цвета. Крутить можно раз в "
+        f"{CASINO_COMMAND} — игровой автомат. Выберите участника; на каждую "
+        f"прокрутку берутся {CASINO_REEL_SYMBOLS} случайных символа из набора "
+        f"{' '.join(CASINO_SYMBOLS)}, из них вы собираете комбинацию длиной "
+        f"{CASINO_SLOTS}. Бот заранее прячет {CASINO_LOSING_COMBOS} проигрышные "
+        "комбинации: попали — осечка, красная карточка достаётся вам; мимо — "
+        "участник получает карточку случайного цвета, красная выпадает реже "
+        "остальных. Крутить можно раз в "
         f"{format_duration(CASINO_COOLDOWN_SECONDS)}.\n\n"
+        "Все меню бот присылает в личку — в чате видно только результат.\n\n"
         f"{LIST_COMMAND} — список карточек участников чата.",
     )
 
