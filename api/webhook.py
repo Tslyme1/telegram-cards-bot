@@ -571,10 +571,10 @@ def _give_green(
 
 
 def show_group_picker(chat_id, giver: dict, reason: str | None, kind: str = "yellow") -> None:
-    """Offer the chat's participants right in the chat.
+    """Offer the chat's participants to the caller, privately.
 
-    Everyone sees the keyboard — Telegram has no per-user message in a group —
-    but only the person who asked for it can use the buttons.
+    Telegram has no per-user message inside a group, so the list goes to the
+    caller's private chat; the group only ever sees the result.
     """
     sync_administrators(chat_id)
     participants = [
@@ -591,14 +591,15 @@ def show_group_picker(chat_id, giver: dict, reason: str | None, kind: str = "yel
         )
         return
 
-    prompt = f"{display_name(giver)}, кому выдать {CARD_NAME[kind]} карточку?"
+    prompt = f"Чат: {storage.get_chat_title(chat_id)}\nКому выдать {CARD_NAME[kind]} карточку?"
     if reason:
         prompt += f"\nПричина: {reason}"
 
-    tg.send_message(
+    sent = send_to_dm(
+        giver,
         chat_id,
         prompt,
-        reply_markup={
+        {
             "inline_keyboard": [
                 *[
                     [{"text": name, "callback_data": f"gu:{kind}:{chat_id}:{uid}"}]
@@ -608,12 +609,20 @@ def show_group_picker(chat_id, giver: dict, reason: str | None, kind: str = "yel
             ]
         },
     )
+    if sent is None:
+        return
 
     # The reason can be longer than callback_data allows, so it waits in the
     # state until the giver taps a name.
     storage.set_state(
         giver["id"],
-        {"step": "pick", "kind": kind, "chat_id": str(chat_id), "reason": reason},
+        {
+            "step": "pick",
+            "kind": kind,
+            "chat_id": str(chat_id),
+            "reason": reason,
+            "message_id": sent.get("message_id"),
+        },
     )
 
 
@@ -795,13 +804,15 @@ def _handle_callback(callback: dict) -> None:
         return
 
     if data.startswith("gu:"):
+        # Same guard as the slot machine: an older picker must not act on the
+        # state a newer one created.
+        if state.get("message_id") != message_id:
+            tg.edit_message_text(dm_chat_id, message_id, "Этот список устарел, вызовите команду заново.")
+            return
+
         _, kind, chat_id, target_id = data.split(":", 3)
         target_name = storage.get_name(chat_id, target_id) or str(target_id)
-        tg.edit_message_text(
-            dm_chat_id,
-            message_id,
-            f"{display_name(user)} выдаёт {CARD_NAME[kind]} карточку: {target_name}",
-        )
+        tg.edit_message_text(dm_chat_id, message_id, f"{CARD_EMOJI[kind]} Выбран: {target_name}")
         finish_give(user, chat_id, chat_id, target_id, state.get("reason"), kind)
         return
 
