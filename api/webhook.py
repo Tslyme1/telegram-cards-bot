@@ -931,6 +931,35 @@ def send_cards_list(source_chat_id, target_chat_id, message_id) -> None:
         tg.edit_message_text(target_chat_id, message_id, text)
 
 
+def handle_reset_coins(message: dict, args: str) -> None:
+    """Force every known participant's kabankoin balance back to the daily default."""
+    chat = message["chat"]
+    if chat.get("type") not in GROUP_TYPES:
+        tg.send_message(chat["id"], "Эта команда работает в групповом чате.")
+        return
+
+    giver = message["from"]
+    status = tg.get_chat_member_status(chat["id"], giver["id"])
+    if status not in ("creator", "administrator"):
+        tg.send_message(
+            chat["id"],
+            "Сбросить балансы кабанкоинов может только администратор чата.",
+            message["message_id"],
+        )
+        return
+
+    day_key = current_day_key()
+    participants = storage.list_participants(chat["id"])
+    for uid, _ in participants:
+        storage.reset_kabankoins(chat["id"], uid, day_key)
+
+    tg.send_message(
+        chat["id"],
+        f"{KABANKOIN_EMOJI} Баланс сброшен до {KABANKOIN_DAILY_AMOUNT} у {len(participants)} "
+        "участников.",
+    )
+
+
 def handle_start(message: dict, args: str) -> None:
     tg.send_message(
         message["chat"]["id"],
@@ -985,6 +1014,7 @@ COMMANDS = {
     GREEN_COMMAND: handle_green,
     CASINO_COMMAND: handle_casino,
     LIST_COMMAND: handle_cards,
+    "/resetcoins": handle_reset_coins,
     # Previous names, kept working as aliases.
     "/yellow": handle_yellow,
     "/cards": handle_cards,

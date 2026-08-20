@@ -151,6 +151,11 @@ def spend_kabankoins(chat_id, user_id, day_key: str, amount: int, daily_amount: 
     return True, balance
 
 
+def reset_kabankoins(chat_id, user_id, day_key: str) -> None:
+    """Drop today's stored balance, so the next read falls back to the daily default."""
+    kv.delete(_key(f"coins:{day_key}", chat_id, user_id))
+
+
 def add_kabankoins(chat_id, user_id, day_key: str, amount: int, daily_amount: int) -> int:
     balance = get_kabankoins(chat_id, user_id, day_key, daily_amount) + amount
     kv.set(_key(f"coins:{day_key}", chat_id, user_id), balance, ex=2 * 24 * 60 * 60)

@@ -44,12 +44,12 @@ CASINO_COINS_BET_MAX = 5
 # tiers, without touching the payout amounts themselves.
 KABANKOIN_PAYOUT_TIERS = [
     (0, 0, 30, 10),  # the bet is lost outright
-    (1, 10, 40, 15),
-    (11, 25, 20, 22),
-    (26, 50, 8, 25),
-    (51, 80, 1.7, 20),
-    (81, 99, 0.2, 6.5),
-    (100, 100, 0.1, 1.5),  # the jackpot
+    (1, 10, 48, 40),
+    (11, 25, 17, 30),
+    (26, 50, 4.5, 15),
+    (51, 80, 0.4, 4),
+    (81, 99, 0.08, 0.9),
+    (100, 100, 0.02, 0.1),  # the jackpot
 ]
 
 # Each red card earned the same day mutes for longer than the previous one;
