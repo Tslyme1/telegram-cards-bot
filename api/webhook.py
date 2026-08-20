@@ -464,7 +464,6 @@ def resolve_slots(
     header = (
         f"🎰 {giver_name} крутит казино на {target_name}\n"
         f"Комбинация: {' '.join(picked)}\n"
-        f"Проигрышные были: {' · '.join(losing)}\n"
     )
 
     if backfired:
