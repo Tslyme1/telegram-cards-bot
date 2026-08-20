@@ -1,3 +1,4 @@
+import itertools
 import os
 import random
 import sys
@@ -12,9 +13,11 @@ import kv  # noqa: E402
 import storage_kv as storage  # noqa: E402
 import telegram_api as tg  # noqa: E402
 from config import (  # noqa: E402
-    CASINO_BACKFIRE_CHANCE,
     CASINO_COOLDOWN_SECONDS,
+    CASINO_LOSING_COMBOS,
     CASINO_OUTCOMES,
+    CASINO_SLOTS,
+    CASINO_SYMBOLS,
     DAY_RESET_UTC_OFFSET_HOURS,
     GIVE_COOLDOWN_SECONDS,
     GREEN_COOLDOWN_SECONDS,
@@ -262,31 +265,35 @@ def finish_give(
         return
     kv.set(key, "1", ex=COOLDOWN_FOR_KIND[kind])
 
-    details = f"\nВыдал: {giver_name}"
+    if kind == "casino":
+        start_slots(giver, ack_chat_id, chat_id, target_id, target_name, reason)
+        return
+
+    apply_card(
+        giver_name, ack_chat_id, chat_id, target_id, target_name, kind, _details(giver_name, reason)
+    )
+
+
+def _details(giver_name: str, reason: str | None, label: str = "Выдал") -> str:
+    details = f"\n{label}: {giver_name}"
     if reason:
         details += f"\nПричина: {reason}"
+    return details
 
-    # The roll goes on top: what came up should be the first thing read, even
-    # when the outcome below it is about a different colour (a green card
-    # absorbing a rolled yellow, say).
-    header = ""
-    backfired = False
-    if kind == "casino":
-        if random.random() < CASINO_BACKFIRE_CHANCE:
-            # The spin turns on the spinner: the red card lands on them instead.
-            backfired = True
-            kind = "red"
-            target_id, target_name = giver["id"], giver_name
-            storage.remember_participant(chat_id, giver["id"], giver_name)
-            header = "🎰 Казино: осечка! 🟥 Красная карточка достаётся тому, кто крутил\n"
-            details = f"\nКрутил: {giver_name}"
-            if reason:
-                details += f"\nПричина: {reason}"
-        else:
-            kind = random.choice(CASINO_OUTCOMES)
-            header = (
-                f"🎰 Казино: выпала {CARD_EMOJI[kind]} {CARD_NAME_NOMINATIVE[kind]} карточка\n"
-            )
+
+def apply_card(
+    giver_name,
+    ack_chat_id,
+    chat_id,
+    target_id,
+    target_name,
+    kind: str,
+    details: str,
+    header: str = "",
+    backfired: bool = False,
+) -> None:
+    """Apply one resolved card, announcing it in `chat_id`."""
+    given_from_group = str(ack_chat_id) == str(chat_id)
 
     if kind == "green":
         _give_green(
@@ -334,6 +341,125 @@ def finish_give(
 
     if not given_from_group:
         tg.send_message(ack_chat_id, f"Готово, карточка выдана: {target_name}.")
+
+
+# --- the slot machine behind /casino ----------------------------------------
+
+
+def slots_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": symbol, "callback_data": f"sl:{index}"}
+                for index, symbol in enumerate(CASINO_SYMBOLS)
+            ],
+            [CANCEL_BUTTON],
+        ]
+    }
+
+
+def slots_text(giver_name: str, target_name: str, picked: list[str]) -> str:
+    reels = " ".join(picked + ["⬜"] * (CASINO_SLOTS - len(picked)))
+    return (
+        f"🎰 {giver_name} крутит казино на {target_name}\n\n"
+        f"{reels}\n\n"
+        f"Символ {len(picked) + 1} из {CASINO_SLOTS} — выбирайте."
+    )
+
+
+def start_slots(giver: dict, ack_chat_id, chat_id, target_id, target_name, reason) -> None:
+    giver_name = display_name(giver)
+    every_combo = ["".join(c) for c in itertools.product(CASINO_SYMBOLS, repeat=CASINO_SLOTS)]
+
+    storage.set_state(
+        giver["id"],
+        {
+            "step": "slots",
+            "chat_id": str(chat_id),
+            "target_id": str(target_id),
+            "reason": reason,
+            "picked": [],
+            # Drawn per spin and revealed afterwards, so the odds stay honest
+            # even though the player picks the symbols by hand.
+            "losing": random.sample(every_combo, CASINO_LOSING_COMBOS),
+        },
+    )
+
+    tg.send_message(
+        ack_chat_id,
+        slots_text(giver_name, target_name, []),
+        reply_markup=slots_keyboard(),
+    )
+
+
+def pick_slot_symbol(giver: dict, state: dict, dm_chat_id, message_id, symbol_index: int) -> None:
+    giver_name = display_name(giver)
+    chat_id = state["chat_id"]
+    target_id = state["target_id"]
+    target_name = storage.get_name(chat_id, target_id) or str(target_id)
+
+    picked = state["picked"] + [CASINO_SYMBOLS[symbol_index]]
+
+    if len(picked) < CASINO_SLOTS:
+        state["picked"] = picked
+        storage.set_state(giver["id"], state)
+        tg.edit_message_text(
+            dm_chat_id,
+            message_id,
+            slots_text(giver_name, target_name, picked),
+            reply_markup=slots_keyboard(),
+        )
+        return
+
+    resolve_slots(giver, state, dm_chat_id, message_id, picked, chat_id, target_id, target_name)
+
+
+def resolve_slots(
+    giver, state, ack_chat_id, message_id, picked, chat_id, target_id, target_name
+) -> None:
+    storage.clear_state(giver["id"])
+
+    giver_name = display_name(giver)
+    combo = "".join(picked)
+    losing = state["losing"]
+    backfired = combo in losing
+
+    tg.edit_message_text(ack_chat_id, message_id, f"🎰 {giver_name}: {' '.join(picked)}")
+
+    header = (
+        f"🎰 {giver_name} крутит казино на {target_name}\n"
+        f"Комбинация: {' '.join(picked)}\n"
+        f"Проигрышные были: {' · '.join(losing)}\n"
+    )
+
+    if backfired:
+        storage.remember_participant(chat_id, giver["id"], giver_name)
+        header += "Осечка! 🟥 Красная карточка достаётся тому, кто крутил\n"
+        apply_card(
+            giver_name,
+            ack_chat_id,
+            chat_id,
+            giver["id"],
+            giver_name,
+            "red",
+            _details(giver_name, state.get("reason"), "Крутил"),
+            header,
+            backfired=True,
+        )
+        return
+
+    kind = random.choice(CASINO_OUTCOMES)
+    header += f"Мимо — выпала {CARD_EMOJI[kind]} {CARD_NAME_NOMINATIVE[kind]} карточка\n"
+    apply_card(
+        giver_name,
+        ack_chat_id,
+        chat_id,
+        target_id,
+        target_name,
+        kind,
+        _details(giver_name, state.get("reason"), "Крутил"),
+        header,
+    )
 
 
 def _award_red(chat_id, target_id, target_name, red: int, details: str, header: str = "") -> None:
@@ -548,10 +674,11 @@ def handle_start(message: dict, args: str) -> None:
         "и гасит будущие жёлтые, по одной за раз. Больше "
         f"{GREEN_IMMUNITY_LIMIT} неиспользованных не накопить. Выдавать можно "
         f"не чаще раза в {format_duration(GREEN_COOLDOWN_SECONDS)}.\n\n"
-        f"{CASINO_COMMAND} — выдать участнику одну карточку случайного цвета: "
-        "зелёную, жёлтую или красную, с равными шансами. Но с вероятностью "
-        f"{round(CASINO_BACKFIRE_CHANCE * 100)}% случается осечка — тогда "
-        "красную карточку получает тот, кто крутил. Крутить можно раз в "
+        f"{CASINO_COMMAND} — игровой автомат. Выберите участника, затем "
+        f"соберите комбинацию из {CASINO_SLOTS} символов ({' '.join(CASINO_SYMBOLS)}) — "
+        f"бот заранее прячет {CASINO_LOSING_COMBOS} проигрышные. Попали в одну "
+        "из них — осечка, красная карточка достаётся вам; мимо — участник "
+        "получает карточку случайного цвета. Крутить можно раз в "
         f"{format_duration(CASINO_COOLDOWN_SECONDS)}.\n\n"
         f"{LIST_COMMAND} — список карточек участников чата.",
     )
@@ -596,16 +723,30 @@ def _handle_callback(callback: dict) -> None:
 
     # A picker posted in a group is visible to everyone, so only the person who
     # asked for it — the one holding the matching state — may use its buttons.
-    if data.startswith("gu:") or (data == "cancel" and message["chat"].get("type") in GROUP_TYPES):
-        if not state:
-            tg.answer_callback_query(callback["id"], "Это не ваша карточка.")
-            return
+    needs_state = data.startswith(("gu:", "sl:")) or (
+        data == "cancel" and message["chat"].get("type") in GROUP_TYPES
+    )
+    if needs_state and not state:
+        tg.answer_callback_query(
+            callback["id"],
+            "Это не ваша прокрутка." if data.startswith("sl:") else "Это не ваша карточка.",
+        )
+        return
 
     tg.answer_callback_query(callback["id"])
 
     if data == "cancel":
         storage.clear_state(user["id"])
         tg.edit_message_text(dm_chat_id, message_id, "Отменено.")
+        return
+
+    if data.startswith("sl:"):
+        if state.get("step") != "slots":
+            tg.edit_message_text(
+                dm_chat_id, message_id, f"Прокрутка устарела, начните заново: {CASINO_COMMAND}"
+            )
+            return
+        pick_slot_symbol(user, state, dm_chat_id, message_id, int(data.split(":", 1)[1]))
         return
 
     if data.startswith("gu:"):
