@@ -30,7 +30,7 @@ CANCEL_BUTTON = {"text": "Отмена", "callback_data": "cancel"}
 
 CARD_NAME = {"yellow": "жёлтую", "green": "зелёную", "casino": "случайную"}
 CARD_NAME_NOMINATIVE = {"yellow": "жёлтая", "green": "зелёная", "red": "красная"}
-CARD_EMOJI = {"yellow": "🟨", "green": "🟩", "casino": "🎰"}
+CARD_EMOJI = {"yellow": "🟨", "green": "🟩", "red": "🟥", "casino": "🎰"}
 
 COOLDOWN_SUBJECT = {
     "yellow": "жёлтой карточкой",
@@ -258,17 +258,25 @@ def finish_give(
     if reason:
         details += f"\nПричина: {reason}"
 
+    # The roll goes on top: what came up should be the first thing read, even
+    # when the outcome below it is about a different colour (a green card
+    # absorbing a rolled yellow, say).
+    header = ""
     if kind == "casino":
         kind = random.choice(CASINO_OUTCOMES)
-        details = f"\n🎰 Казино: выпала {CARD_NAME_NOMINATIVE[kind]} карточка{details}"
+        header = (
+            f"🎰 Казино: выпала {CARD_EMOJI[kind]} {CARD_NAME_NOMINATIVE[kind]} карточка\n"
+        )
 
     if kind == "green":
-        _give_green(chat_id, ack_chat_id, target_id, target_name, details, given_from_group)
+        _give_green(
+            chat_id, ack_chat_id, target_id, target_name, details, given_from_group, header
+        )
         return
 
     if kind == "red":
         red = storage.add_red_card(chat_id, target_id, target_name)
-        _award_red(chat_id, target_id, target_name, red, details)
+        _award_red(chat_id, target_id, target_name, red, details, header)
         if not given_from_group:
             tg.send_message(ack_chat_id, f"Готово, красная карточка: {target_name}.")
         return
@@ -278,7 +286,7 @@ def finish_give(
         left = f" Зелёных осталось: {greens_left}." if greens_left else ""
         tg.send_message(
             chat_id,
-            f"🟩 {target_name} тратит зелёную карточку — жёлтая не засчитана."
+            f"{header}🟩 {target_name} тратит зелёную карточку — жёлтая не засчитана."
             f"{left}{details}",
         )
         if not given_from_group:
@@ -288,18 +296,19 @@ def finish_give(
     yellow, red = storage.add_yellow_card(chat_id, target_id, target_name, YELLOW_THRESHOLD)
 
     if yellow == 0 and red > 0:
-        _award_red(chat_id, target_id, target_name, red, details)
+        _award_red(chat_id, target_id, target_name, red, details, header)
     else:
         tg.send_message(
             chat_id,
-            f"🟨 {target_name} получает жёлтую карточку ({yellow}/{YELLOW_THRESHOLD}).{details}",
+            f"{header}🟨 {target_name} получает жёлтую карточку "
+            f"({yellow}/{YELLOW_THRESHOLD}).{details}",
         )
 
     if not given_from_group:
         tg.send_message(ack_chat_id, f"Готово, карточка выдана: {target_name}.")
 
 
-def _award_red(chat_id, target_id, target_name, red: int, details: str) -> None:
+def _award_red(chat_id, target_id, target_name, red: int, details: str, header: str = "") -> None:
     """Announce a red card and mute for however long the day's ladder says."""
     mute_seconds, reds_today = storage.next_mute_seconds(
         chat_id, target_id, current_day_key(), MUTE_LADDER_SECONDS
@@ -312,13 +321,13 @@ def _award_red(chat_id, target_id, target_name, red: int, details: str) -> None:
         tg.restrict_chat_member(chat_id, target_id, until)
         tg.send_message(
             chat_id,
-            f"🟥 {target_name} получает красную карточку (всего красных: {red}) "
+            f"{header}🟥 {target_name} получает красную карточку (всего красных: {red}) "
             f"и заглушен в чате на {format_duration(mute_seconds)}.{details}",
         )
     except Exception:
         tg.send_message(
             chat_id,
-            f"🟥 {target_name} получает красную карточку (всего красных: {red}), "
+            f"{header}🟥 {target_name} получает красную карточку (всего красных: {red}), "
             f"но заглушить не удалось: {_mute_failure_reason(chat_id, target_id)}.{details}",
         )
 
@@ -343,7 +352,9 @@ def _mute_failure_reason(chat_id, target_id) -> str:
     )
 
 
-def _give_green(chat_id, ack_chat_id, target_id, target_name, details, given_from_group) -> None:
+def _give_green(
+    chat_id, ack_chat_id, target_id, target_name, details, given_from_group, header: str = ""
+) -> None:
     outcome, count = storage.give_green_card(
         chat_id, target_id, target_name, GREEN_IMMUNITY_LIMIT
     )
@@ -364,7 +375,7 @@ def _give_green(chat_id, ack_chat_id, target_id, target_name, details, given_fro
             f"({GREEN_IMMUNITY_LIMIT}) — больше не накопить.{details}"
         )
 
-    tg.send_message(chat_id, text)
+    tg.send_message(chat_id, header + text)
     if not given_from_group:
         tg.send_message(ack_chat_id, f"Готово, зелёная карточка: {target_name}.")
 
