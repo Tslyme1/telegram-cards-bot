@@ -794,16 +794,28 @@ def resolve_coin_spin(giver, dm_chat_id, message_id, chat_id, bet, reason) -> No
         return
 
     payout = roll_kabankoin_payout(bet)
-    balance = storage.add_kabankoins(chat_id, giver["id"], current_day_key(), payout, KABANKOIN_DAILY_AMOUNT)
+    if payout > 0:
+        balance = storage.add_kabankoins(
+            chat_id, giver["id"], current_day_key(), payout, KABANKOIN_DAILY_AMOUNT
+        )
 
-    jackpot = " 🎉 ДЖЕКПОТ!" if payout == 100 else ""
-    tg.edit_message_text(dm_chat_id, message_id, f"{KABANKOIN_EMOJI} Выпало: {payout}{jackpot}")
+    jackpot = payout == 100
+    if payout == 0:
+        outcome = "ничего не выпало 😢"
+    elif jackpot:
+        outcome = f"выпадает {payout} 🎉 ДЖЕКПОТ!"
+    else:
+        outcome = f"выпадает {payout}"
+
+    tg.edit_message_text(
+        dm_chat_id, message_id, f"{KABANKOIN_EMOJI} {'Пусто' if payout == 0 else f'Выпало: {payout}'}"
+    )
 
     details = f"\nПричина: {reason}" if reason else ""
     tg.send_message(
         chat_id,
         f"{KABANKOIN_EMOJI} {giver_name} крутит кабанкоин-казино, ставка {bet} — "
-        f"выпадает {payout}{jackpot}\nБаланс: {balance} {KABANKOIN_EMOJI}{details}",
+        f"{outcome}\nБаланс: {balance} {KABANKOIN_EMOJI}{details}",
     )
 
 
