@@ -1198,13 +1198,23 @@ def finish_rename(
         tg.promote_chat_member(chat_id, target_id)
         tg.set_chat_administrator_custom_title(chat_id, target_id, title_text)
     except Exception:
-        # The badge didn't go through (usually a missing bot permission) —
-        # don't charge for something that wasn't delivered.
+        app.logger.exception("Failed to grant a nickname badge for %s in %s", target_id, chat_id)
+        # promoteChatMember may have already gone through even if the title
+        # call failed after it — clean up so nobody is left as a permanent,
+        # untracked zero-permission admin.
+        try:
+            tg.demote_chat_member(chat_id, target_id)
+        except Exception:
+            app.logger.exception("Failed to clean up a partial promotion for %s in %s", target_id, chat_id)
+        # The badge didn't go through — don't charge for something that
+        # wasn't delivered.
         balance = storage.add_kabankoins(chat_id, giver["id"], current_day_key(), price, KABANKOIN_DAILY_AMOUNT)
         tg.send_message(
             ack_chat_id,
-            "Не удалось выдать тег — боту не хватает прав. Дайте боту право "
-            "«Назначение новых администраторов» в настройках чата. Кабанкоины возвращены.",
+            "Не удалось выдать тег — боту не хватает прав. В настройках чата у "
+            "бота должна быть отдельно включена галочка «Назначение новых "
+            "администраторов» (Add New Admins) — без неё бот не может выдавать "
+            "теги, даже если остальные права у него уже есть. Кабанкоины возвращены.",
         )
         return
 
