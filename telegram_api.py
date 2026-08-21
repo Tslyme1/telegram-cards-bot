@@ -84,8 +84,11 @@ def set_chat_member_tag(chat_id, user_id, tag: str = "") -> dict:
     Unlike an admin's custom title, this needs no promotion — Bot API 9.5's
     setChatMemberTag works directly on any member. The bot itself still
     needs to be an administrator with the can_manage_tags right.
+
+    user_id is coerced to an int: ids travel through the dialog state as
+    strings, and this method is stricter about the type than the older ones.
     """
-    return _call("setChatMemberTag", chat_id=chat_id, user_id=user_id, tag=tag)
+    return _call("setChatMemberTag", chat_id=chat_id, user_id=int(user_id), tag=tag)
 
 
 def get_me() -> dict:

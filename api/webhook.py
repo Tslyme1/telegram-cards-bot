@@ -1217,17 +1217,15 @@ def finish_tag(
 
     try:
         tg.set_chat_member_tag(chat_id, target_id, title_text)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - the reason goes to the user, not just the log
         app.logger.exception("Failed to set a member tag for %s in %s", target_id, chat_id)
         # The tag didn't go through — don't charge for something that wasn't
-        # delivered.
+        # delivered. Telegram's own wording comes along: guessing at the cause
+        # sent people chasing the wrong chat setting.
         balance = storage.add_kabankoins(chat_id, giver["id"], current_day_key(), price, KABANKOIN_DAILY_AMOUNT)
         tg.send_message(
             ack_chat_id,
-            "Не удалось выдать тег — боту не хватает прав. В правах бота-"
-            "администратора должно быть отдельно включено управление тегами "
-            "участников — без него бот не может выдавать теги, даже если "
-            "остальные права у него уже есть. Кабанкоины возвращены.",
+            f"Не удалось выдать тег. Кабанкоины возвращены.\n\nОтвет Telegram: {exc}",
         )
         return
 
@@ -1838,6 +1836,10 @@ def _health_response():
             "service": "telegram-cards-bot",
             "bot_token_set": "BOT_TOKEN" in os.environ,
             "kv": _check_kv(),
+            # Listed so a stale deployment is visible from a browser: if a
+            # command you expect is missing here, the running code is older
+            # than the repository.
+            "commands": sorted(COMMANDS),
         }
     )
 
