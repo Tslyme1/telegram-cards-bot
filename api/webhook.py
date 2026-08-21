@@ -1,6 +1,7 @@
 import itertools
 import os
 import random
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -34,8 +35,8 @@ from config import (  # noqa: E402
     KABANKOIN_JAIL_MUTE_SECONDS,
     KABANKOIN_PAYOUT_TIERS,
     MUTE_LADDER_SECONDS,
-    NICKNAME_MAX_LENGTH,
-    NICKNAME_PRICE_TIERS,
+    TAG_MAX_LENGTH,
+    TAG_PRICE_TIERS,
     YELLOW_THRESHOLD,
 )
 
@@ -50,6 +51,26 @@ CARD_NAME_NOMINATIVE = {"yellow": "жёлтая", "green": "зелёная", "re
 CARD_EMOJI = {"yellow": "🟨", "green": "🟩", "red": "🟥", "casino": "🎰"}
 
 KABANKOIN_EMOJI = "🪙"
+
+# setChatMemberTag rejects emoji in the tag text; catch the common ranges
+# ourselves so the error reads as a normal validation message, not a raw API
+# failure.
+_EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001f300-\U0001faff"  # pictographs, emoticons, transport, symbols
+    "\U00002600-\U000027bf"  # misc symbols, dingbats
+    "\U0001f1e6-\U0001f1ff"  # regional indicators (flag emoji)
+    "\U0001f000-\U0001f0ff"  # mahjong / playing cards
+    "\U00002b00-\U00002bff"  # misc symbols and arrows (stars, etc.)
+    "\U0000fe0f"  # variation selector-16 (emoji presentation)
+    "\U0000200d"  # zero-width joiner (combines emoji)
+    "]"
+)
+
+
+def contains_emoji(text: str) -> bool:
+    return bool(_EMOJI_PATTERN.search(text))
+
 
 COOLDOWN_SUBJECT = {
     "yellow": "жёлтой карточкой",
@@ -204,11 +225,11 @@ def sync_administrators(chat_id) -> None:
 
 
 def sweep_expired_titles(chat_id) -> None:
-    """Best-effort demotion of expired badges, checked on chat activity.
+    """Best-effort clearing of expired tags, checked on chat activity.
 
     There is no scheduled execution anywhere in this bot — it only reacts to
-    incoming updates — so an expired badge is only caught the next time
-    someone posts in that chat, not to the second.
+    incoming updates — so an expired tag is only caught the next time someone
+    posts in that chat, not to the second.
     """
     now = int(time.time())
     for uid in storage.list_titled(chat_id):
@@ -217,9 +238,9 @@ def sweep_expired_titles(chat_id) -> None:
             continue
         if expiry is not None:
             try:
-                tg.demote_chat_member(chat_id, uid)
+                tg.set_chat_member_tag(chat_id, uid, "")
             except Exception:
-                app.logger.exception("Failed to demote expired title for %s in %s", uid, chat_id)
+                app.logger.exception("Failed to clear expired tag for %s in %s", uid, chat_id)
         storage.clear_temp_title(chat_id, uid)
 
 
@@ -1050,33 +1071,33 @@ def _parse_amount(args: str) -> int | None:
     return amount if amount > 0 else None
 
 
-# --- /rename: buy a temporary admin badge for another participant ----------
+# --- /tag: buy a temporary member tag for another participant --------------
 
 
-def start_rename_flow(giver: dict, dm_chat_id) -> None:
-    """Entry point for /rename from the bot's DM: pick a chat first if there are several."""
+def start_tag_flow(giver: dict, dm_chat_id) -> None:
+    """Entry point for /tag from the bot's DM: pick a chat first if there are several."""
     chats = storage.list_user_chats(giver["id"])
     if not chats:
         tg.send_message(
             dm_chat_id,
             "Я пока не знаю ни одного чата, где вы состоите.\n"
-            f"Напишите что-нибудь в группе, где я работаю, и повторите {RENAME_COMMAND}.",
+            f"Напишите что-нибудь в группе, где я работаю, и повторите {TAG_COMMAND}.",
         )
         return
 
     if len(chats) == 1:
-        show_rename_target_picker(giver, dm_chat_id, chats[0][0], None)
+        show_tag_target_picker(giver, dm_chat_id, chats[0][0], None)
         return
 
-    keyboard = [[{"text": title, "callback_data": f"rnchat:{cid}"}] for cid, title in chats]
+    keyboard = [[{"text": title, "callback_data": f"tagchat:{cid}"}] for cid, title in chats]
     keyboard.append([CANCEL_BUTTON])
     sent = tg.send_message(
         dm_chat_id, "В каком чате покупаем тег?", reply_markup={"inline_keyboard": keyboard}
     )
-    storage.set_state(giver["id"], {"step": "rn_chat", "message_id": sent.get("message_id")})
+    storage.set_state(giver["id"], {"step": "tag_chat", "message_id": sent.get("message_id")})
 
 
-def show_rename_target_picker(giver: dict, dm_chat_id, chat_id, message_id) -> None:
+def show_tag_target_picker(giver: dict, dm_chat_id, chat_id, message_id) -> None:
     sync_administrators(chat_id)
     participants = [
         (uid, name) for uid, name in storage.list_participants(chat_id) if str(uid) != str(giver["id"])
@@ -1093,7 +1114,7 @@ def show_rename_target_picker(giver: dict, dm_chat_id, chat_id, message_id) -> N
         keyboard = {
             "inline_keyboard": [
                 *[
-                    [{"text": name, "callback_data": f"rnuser:{chat_id}:{uid}"}]
+                    [{"text": name, "callback_data": f"taguser:{chat_id}:{uid}"}]
                     for uid, name in participants
                 ],
                 [CANCEL_BUTTON],
@@ -1108,13 +1129,13 @@ def show_rename_target_picker(giver: dict, dm_chat_id, chat_id, message_id) -> N
     else:
         tg.edit_message_text(dm_chat_id, message_id, text, reply_markup=keyboard)
 
-    storage.set_state(giver["id"], {"step": "rn_target", "chat_id": str(chat_id), "message_id": message_id})
+    storage.set_state(giver["id"], {"step": "tag_target", "chat_id": str(chat_id), "message_id": message_id})
 
 
-def show_rename_tier_picker(giver: dict, dm_chat_id, chat_id, message_id, target_id) -> None:
+def show_tag_tier_picker(giver: dict, dm_chat_id, chat_id, message_id, target_id) -> None:
     balance = get_kabankoins(chat_id, giver["id"])
     target_name = storage.get_name(chat_id, target_id) or str(target_id)
-    affordable = [(seconds, price) for seconds, price in NICKNAME_PRICE_TIERS if price <= balance]
+    affordable = [(seconds, price) for seconds, price in TAG_PRICE_TIERS if price <= balance]
 
     if not affordable:
         text = insufficient_balance_text(balance)
@@ -1132,7 +1153,7 @@ def show_rename_tier_picker(giver: dict, dm_chat_id, chat_id, message_id, target
                 [
                     {
                         "text": f"{price} {KABANKOIN_EMOJI} — {format_duration(seconds)}",
-                        "callback_data": f"rntier:{seconds}:{price}",
+                        "callback_data": f"tagtier:{seconds}:{price}",
                     }
                 ]
                 for seconds, price in affordable
@@ -1151,15 +1172,15 @@ def show_rename_tier_picker(giver: dict, dm_chat_id, chat_id, message_id, target
 
     storage.set_state(
         giver["id"],
-        {"step": "rn_tier", "chat_id": str(chat_id), "target_id": str(target_id), "message_id": message_id},
+        {"step": "tag_tier", "chat_id": str(chat_id), "target_id": str(target_id), "message_id": message_id},
     )
 
 
-def ask_rename_title(giver_id, dm_chat_id, message_id, chat_id, target_id, seconds: int, price: int) -> None:
+def ask_tag_text(giver_id, dm_chat_id, message_id, chat_id, target_id, seconds: int, price: int) -> None:
     storage.set_state(
         giver_id,
         {
-            "step": "rn_title",
+            "step": "tag_text",
             "chat_id": str(chat_id),
             "target_id": str(target_id),
             "seconds": seconds,
@@ -1170,12 +1191,12 @@ def ask_rename_title(giver_id, dm_chat_id, message_id, chat_id, target_id, secon
     tg.edit_message_text(
         dm_chat_id,
         message_id,
-        f"Отправьте текст тега сообщением — до {NICKNAME_MAX_LENGTH} символов.",
+        f"Отправьте текст тега сообщением — до {TAG_MAX_LENGTH} символов.",
         reply_markup={"inline_keyboard": [[CANCEL_BUTTON]]},
     )
 
 
-def finish_rename(
+def finish_tag(
     giver: dict, ack_chat_id, chat_id, target_id, seconds: int, price: int, title_text: str
 ) -> None:
     storage.clear_state(giver["id"])
@@ -1195,25 +1216,17 @@ def finish_rename(
         return
 
     try:
-        tg.promote_chat_member(chat_id, target_id)
-        tg.set_chat_administrator_custom_title(chat_id, target_id, title_text)
+        tg.set_chat_member_tag(chat_id, target_id, title_text)
     except Exception:
-        app.logger.exception("Failed to grant a nickname badge for %s in %s", target_id, chat_id)
-        # promoteChatMember may have already gone through even if the title
-        # call failed after it — clean up so nobody is left as a permanent,
-        # untracked zero-permission admin.
-        try:
-            tg.demote_chat_member(chat_id, target_id)
-        except Exception:
-            app.logger.exception("Failed to clean up a partial promotion for %s in %s", target_id, chat_id)
-        # The badge didn't go through — don't charge for something that
-        # wasn't delivered.
+        app.logger.exception("Failed to set a member tag for %s in %s", target_id, chat_id)
+        # The tag didn't go through — don't charge for something that wasn't
+        # delivered.
         balance = storage.add_kabankoins(chat_id, giver["id"], current_day_key(), price, KABANKOIN_DAILY_AMOUNT)
         tg.send_message(
             ack_chat_id,
-            "Не удалось выдать тег — боту не хватает прав. В настройках чата у "
-            "бота должна быть отдельно включена галочка «Назначение новых "
-            "администраторов» — без неё бот не может выдавать теги, даже если "
+            "Не удалось выдать тег — боту не хватает прав. В правах бота-"
+            "администратора должно быть отдельно включено управление тегами "
+            "участников — без него бот не может выдавать теги, даже если "
             "остальные права у него уже есть. Кабанкоины возвращены.",
         )
         return
@@ -1376,12 +1389,12 @@ def handle_pay(message: dict, args: str) -> None:
     show_pay_target_picker(giver, chat["id"], chat["id"], None, amount)
 
 
-def handle_rename(message: dict, args: str) -> None:
+def handle_tag(message: dict, args: str) -> None:
     chat = message["chat"]
     giver = message["from"]
 
     if chat.get("type") not in GROUP_TYPES:
-        start_rename_flow(giver, chat["id"])
+        start_tag_flow(giver, chat["id"])
         return
 
     reply = message.get("reply_to_message")
@@ -1394,10 +1407,10 @@ def handle_rename(message: dict, args: str) -> None:
             tg.send_message(chat["id"], "Нельзя купить тег самому себе.", message["message_id"])
             return
         storage.remember_participant(chat["id"], target["id"], display_name(target))
-        show_rename_tier_picker(giver, chat["id"], chat["id"], None, target["id"])
+        show_tag_tier_picker(giver, chat["id"], chat["id"], None, target["id"])
         return
 
-    show_rename_target_picker(giver, chat["id"], chat["id"], None)
+    show_tag_target_picker(giver, chat["id"], chat["id"], None)
 
 
 def handle_reset_coins(message: dict, args: str) -> None:
@@ -1473,11 +1486,11 @@ def handle_start(message: dict, args: str) -> None:
         f"восстанавливает баланс до {KABANKOIN_DAILY_AMOUNT} {KABANKOIN_EMOJI}.\n\n"
         f"{PAY_COMMAND} <количество> — отправить кабанкоины другому участнику: "
         "ответом на сообщение, или без ответа — бот покажет список в личке.\n\n"
-        f"{RENAME_COMMAND} — купить участнику тег администратора (виден рядом с "
-        "именем в чате, сам ник и @username в Telegram не меняются): "
-        + ", ".join(f"{price} {KABANKOIN_EMOJI} на {format_duration(s)}" for s, price in NICKNAME_PRICE_TIERS)
-        + f". Тег до {NICKNAME_MAX_LENGTH} символов, снимается ботом при первом "
-        "сообщении в чате после истечения срока.\n\n"
+        f"{TAG_COMMAND} — купить участнику тег рядом с именем в чате (сам ник и "
+        "@username в Telegram не меняются, администратором это не делает): "
+        + ", ".join(f"{price} {KABANKOIN_EMOJI} на {format_duration(s)}" for s, price in TAG_PRICE_TIERS)
+        + f". Тег до {TAG_MAX_LENGTH} символов, без эмодзи, снимается ботом при "
+        "первом сообщении в чате после истечения срока.\n\n"
         f"{LIST_COMMAND} — список карточек участников чата.",
     )
 
@@ -1487,7 +1500,7 @@ GREEN_COMMAND = "/green"
 CASINO_COMMAND = "/casino"
 LIST_COMMAND = "/list"
 PAY_COMMAND = "/send"
-RENAME_COMMAND = "/rename"
+TAG_COMMAND = "/tag"
 
 COMMAND_FOR_KIND = {
     "yellow": GIVE_COMMAND,
@@ -1501,13 +1514,14 @@ COMMANDS = {
     CASINO_COMMAND: handle_casino,
     LIST_COMMAND: handle_cards,
     PAY_COMMAND: handle_pay,
-    RENAME_COMMAND: handle_rename,
+    TAG_COMMAND: handle_tag,
     "/resetcoins": handle_reset_coins,
     # Previous names, kept working as aliases.
     "/yellow": handle_yellow,
     "/cards": handle_cards,
     "/kabany": handle_cards,
     "/pay": handle_pay,
+    "/rename": handle_tag,
     "/start": handle_start,
     "/help": handle_start,
 }
@@ -1530,7 +1544,7 @@ def _handle_callback(callback: dict) -> None:
     needs_state = data.startswith(
         (
             "gu:", "sl:", "cchat:", "ctype:", "cuser:", "cbet:",
-            "paychat:", "payuser:", "rnchat:", "rnuser:", "rntier:",
+            "paychat:", "payuser:", "tagchat:", "taguser:", "tagtier:",
         )
     ) or (data == "cancel" and message["chat"].get("type") in GROUP_TYPES)
     if needs_state and not state:
@@ -1538,7 +1552,7 @@ def _handle_callback(callback: dict) -> None:
             text = "Это не ваша прокрутка."
         elif data.startswith(("paychat:", "payuser:")):
             text = "Это не ваш перевод."
-        elif data.startswith(("rnchat:", "rnuser:", "rntier:")):
+        elif data.startswith(("tagchat:", "taguser:", "tagtier:")):
             text = "Это не ваш тег."
         else:
             text = "Это не ваша карточка."
@@ -1674,28 +1688,28 @@ def _handle_callback(callback: dict) -> None:
             ask_pay_amount(user["id"], dm_chat_id, message_id, chat_id, target_id)
         return
 
-    if data.startswith("rnchat:"):
-        if state.get("step") != "rn_chat" or state.get("message_id") != message_id:
-            tg.edit_message_text(dm_chat_id, message_id, f"Устарело, начните заново: {RENAME_COMMAND}")
+    if data.startswith("tagchat:"):
+        if state.get("step") != "tag_chat" or state.get("message_id") != message_id:
+            tg.edit_message_text(dm_chat_id, message_id, f"Устарело, начните заново: {TAG_COMMAND}")
             return
         chat_id = data.split(":", 1)[1]
-        show_rename_target_picker(user, dm_chat_id, chat_id, message_id)
+        show_tag_target_picker(user, dm_chat_id, chat_id, message_id)
         return
 
-    if data.startswith("rnuser:"):
-        if state.get("step") != "rn_target" or state.get("message_id") != message_id:
-            tg.edit_message_text(dm_chat_id, message_id, f"Устарело, начните заново: {RENAME_COMMAND}")
+    if data.startswith("taguser:"):
+        if state.get("step") != "tag_target" or state.get("message_id") != message_id:
+            tg.edit_message_text(dm_chat_id, message_id, f"Устарело, начните заново: {TAG_COMMAND}")
             return
         _, chat_id, target_id = data.split(":", 2)
-        show_rename_tier_picker(user, dm_chat_id, chat_id, message_id, target_id)
+        show_tag_tier_picker(user, dm_chat_id, chat_id, message_id, target_id)
         return
 
-    if data.startswith("rntier:"):
-        if state.get("step") != "rn_tier" or state.get("message_id") != message_id:
-            tg.edit_message_text(dm_chat_id, message_id, f"Устарело, начните заново: {RENAME_COMMAND}")
+    if data.startswith("tagtier:"):
+        if state.get("step") != "tag_tier" or state.get("message_id") != message_id:
+            tg.edit_message_text(dm_chat_id, message_id, f"Устарело, начните заново: {TAG_COMMAND}")
             return
         _, seconds, price = data.split(":", 2)
-        ask_rename_title(
+        ask_tag_text(
             user["id"], dm_chat_id, message_id, state["chat_id"], state["target_id"], int(seconds), int(price)
         )
         return
@@ -1739,15 +1753,22 @@ def _handle_private_text(message: dict) -> None:
         finish_pay(user, message["chat"]["id"], state["chat_id"], state["target_id"], int(text))
         return
 
-    if step == "rn_title":
+    if step == "tag_text":
         text = message["text"].strip()
-        if not text or len(text) > NICKNAME_MAX_LENGTH:
+        if not text or len(text) > TAG_MAX_LENGTH:
             tg.send_message(
                 message["chat"]["id"],
-                f"Тег должен быть от 1 до {NICKNAME_MAX_LENGTH} символов. Отправьте другой текст.",
+                f"Тег должен быть от 1 до {TAG_MAX_LENGTH} символов. Отправьте другой текст.",
             )
             return
-        finish_rename(
+        if contains_emoji(text):
+            tg.send_message(
+                message["chat"]["id"],
+                "В теге нельзя использовать эмодзи — это ограничение самого Telegram. "
+                "Отправьте другой текст.",
+            )
+            return
+        finish_tag(
             user,
             message["chat"]["id"],
             state["chat_id"],

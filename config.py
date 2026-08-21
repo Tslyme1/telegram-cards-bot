@@ -59,9 +59,10 @@ MUTE_LADDER_SECONDS = [60, 5 * 60, 15 * 60, 30 * 60, 60 * 60]
 # The ladder starts over at midnight in this timezone (UTC+3 — Москва).
 DAY_RESET_UTC_OFFSET_HOURS = 3
 
-# Buying a temporary admin badge (custom title) for someone else. Each tier is
-# (duration_seconds, price_in_kabankoins).
-NICKNAME_PRICE_TIERS = [
+# Buying a temporary tag (setChatMemberTag, Bot API 9.5+) for someone else —
+# a label next to their name that needs no admin promotion at all. Each tier
+# is (duration_seconds, price_in_kabankoins).
+TAG_PRICE_TIERS = [
     (3600, 50),
     (2 * 3600, 100),
     (4 * 3600, 200),
@@ -69,8 +70,8 @@ NICKNAME_PRICE_TIERS = [
     (7 * 24 * 3600, 2000),
 ]
 
-# Telegram's own limit on setChatAdministratorCustomTitle.
-NICKNAME_MAX_LENGTH = 16
+# Telegram's own limits on setChatMemberTag: 16 characters, no emoji.
+TAG_MAX_LENGTH = 16
 
 # Casino bets no longer get refused for lack of funds — they can go into debt
 # instead, down to KABANKOIN_DEBT_BAN_LEVEL. Crossing each level below

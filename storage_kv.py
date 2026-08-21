@@ -195,7 +195,7 @@ def next_mute_seconds(chat_id, user_id, day_key: str, ladder: list[int]) -> tupl
 
 
 def set_temp_title(chat_id, user_id, expires_at: int) -> None:
-    """Record a purchased admin badge, so a lazy sweep can find and demote it later."""
+    """Record a purchased member tag, so a lazy sweep can find and clear it later."""
     kv.sadd(_key("titled", chat_id), str(user_id))
     kv.set(_key("titleexp", chat_id, user_id), expires_at)
 
@@ -211,7 +211,7 @@ def clear_temp_title(chat_id, user_id) -> None:
 
 
 def list_titled(chat_id) -> list[str]:
-    """User ids with a currently tracked temporary admin badge in this chat."""
+    """User ids with a currently tracked temporary member tag in this chat."""
     return kv.smembers(_key("titled", chat_id))
 
 

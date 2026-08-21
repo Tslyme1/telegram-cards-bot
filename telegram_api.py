@@ -19,23 +19,6 @@ MUTE_PERMISSIONS = {
 
 MEMBER_STATUSES = {"creator", "administrator", "member", "restricted"}
 
-# A purely cosmetic admin badge: every real permission stays off. Telegram
-# also uses this same call, with every flag already off, to demote back to a
-# regular member.
-ADMIN_PERMISSIONS_NONE = {
-    "can_manage_chat": False,
-    "can_delete_messages": False,
-    "can_manage_video_chats": False,
-    "can_restrict_members": False,
-    "can_promote_members": False,
-    "can_change_info": False,
-    "can_invite_users": False,
-    "can_post_messages": False,
-    "can_edit_messages": False,
-    "can_pin_messages": False,
-    "can_manage_topics": False,
-}
-
 
 def _call(method: str, **params) -> dict:
     token = os.environ["BOT_TOKEN"]
@@ -95,21 +78,14 @@ def get_chat_administrators(chat_id) -> list:
     return _call("getChatAdministrators", chat_id=chat_id)
 
 
-def promote_chat_member(chat_id, user_id) -> dict:
-    return _call("promoteChatMember", chat_id=chat_id, user_id=user_id, **ADMIN_PERMISSIONS_NONE)
+def set_chat_member_tag(chat_id, user_id, tag: str = "") -> dict:
+    """Set (or, with an empty tag, clear) a regular member's tag.
 
-
-def demote_chat_member(chat_id, user_id) -> dict:
-    return promote_chat_member(chat_id, user_id)
-
-
-def set_chat_administrator_custom_title(chat_id, user_id, custom_title: str) -> dict:
-    return _call(
-        "setChatAdministratorCustomTitle",
-        chat_id=chat_id,
-        user_id=user_id,
-        custom_title=custom_title,
-    )
+    Unlike an admin's custom title, this needs no promotion — Bot API 9.5's
+    setChatMemberTag works directly on any member. The bot itself still
+    needs to be an administrator with the can_manage_tags right.
+    """
+    return _call("setChatMemberTag", chat_id=chat_id, user_id=user_id, tag=tag)
 
 
 def get_me() -> dict:
