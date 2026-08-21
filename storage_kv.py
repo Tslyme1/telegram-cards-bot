@@ -176,6 +176,27 @@ def next_mute_seconds(chat_id, user_id, day_key: str, ladder: list[int]) -> tupl
     return ladder[min(count, len(ladder)) - 1], count
 
 
+def set_temp_title(chat_id, user_id, expires_at: int) -> None:
+    """Record a purchased admin badge, so a lazy sweep can find and demote it later."""
+    kv.sadd(_key("titled", chat_id), str(user_id))
+    kv.set(_key("titleexp", chat_id, user_id), expires_at)
+
+
+def get_title_expiry(chat_id, user_id) -> int | None:
+    raw = kv.get(_key("titleexp", chat_id, user_id))
+    return int(raw) if raw is not None else None
+
+
+def clear_temp_title(chat_id, user_id) -> None:
+    kv.delete(_key("titleexp", chat_id, user_id))
+    kv.srem(_key("titled", chat_id), str(user_id))
+
+
+def list_titled(chat_id) -> list[str]:
+    """User ids with a currently tracked temporary admin badge in this chat."""
+    return kv.smembers(_key("titled", chat_id))
+
+
 def set_state(user_id, state: dict) -> None:
     kv.set(_key("state", user_id), json.dumps(state), ex=STATE_TTL_SECONDS)
 

@@ -58,3 +58,16 @@ MUTE_LADDER_SECONDS = [60, 5 * 60, 15 * 60, 30 * 60, 60 * 60]
 
 # The ladder starts over at midnight in this timezone (UTC+3 — Москва).
 DAY_RESET_UTC_OFFSET_HOURS = 3
+
+# Buying a temporary admin badge (custom title) for someone else. Each tier is
+# (duration_seconds, price_in_kabankoins).
+NICKNAME_PRICE_TIERS = [
+    (3600, 50),
+    (2 * 3600, 100),
+    (4 * 3600, 200),
+    (24 * 3600, 500),
+    (7 * 24 * 3600, 2000),
+]
+
+# Telegram's own limit on setChatAdministratorCustomTitle.
+NICKNAME_MAX_LENGTH = 16

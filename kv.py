@@ -48,6 +48,10 @@ def smembers(key: str) -> list:
     return _request(["SMEMBERS", key]) or []
 
 
+def srem(key: str, member: str):
+    return _request(["SREM", key, member])
+
+
 def delete(key: str):
     return _request(["DEL", key])
 
