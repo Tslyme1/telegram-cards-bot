@@ -71,3 +71,14 @@ NICKNAME_PRICE_TIERS = [
 
 # Telegram's own limit on setChatAdministratorCustomTitle.
 NICKNAME_MAX_LENGTH = 16
+
+# Casino bets no longer get refused for lack of funds — they can go into debt
+# instead, down to KABANKOIN_DEBT_BAN_LEVEL. Crossing each level below
+# punishes the spinner in the group chat; once debt reaches the ban level,
+# further casino spins are refused until the balance recovers (a win, a
+# /pay, or the next day's reset). Spaced 5 apart on purpose: the biggest
+# single bet (CASINO_COINS_BET_MAX) can never jump past a level unnoticed.
+KABANKOIN_DEBT_YELLOW_LEVEL = -5
+KABANKOIN_DEBT_RED_LEVEL = -10
+KABANKOIN_DEBT_BAN_LEVEL = -15
+KABANKOIN_DEBT_BAN_SECONDS = 60 * 60

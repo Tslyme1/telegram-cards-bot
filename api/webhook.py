@@ -27,6 +27,10 @@ from config import (  # noqa: E402
     GREEN_COOLDOWN_SECONDS,
     GREEN_IMMUNITY_LIMIT,
     KABANKOIN_DAILY_AMOUNT,
+    KABANKOIN_DEBT_BAN_LEVEL,
+    KABANKOIN_DEBT_BAN_SECONDS,
+    KABANKOIN_DEBT_RED_LEVEL,
+    KABANKOIN_DEBT_YELLOW_LEVEL,
     KABANKOIN_PAYOUT_TIERS,
     MUTE_LADDER_SECONDS,
     NICKNAME_MAX_LENGTH,
@@ -99,6 +103,13 @@ def insufficient_balance_text(balance: int) -> str:
     return (
         f"{KABANKOIN_EMOJI} Не хватает кабанкоинов (баланс: {balance}). "
         f"Обновится через {format_duration(seconds_until_day_reset())}."
+    )
+
+
+def debt_limit_text() -> str:
+    return (
+        f"{KABANKOIN_EMOJI} Долг уже {KABANKOIN_DEBT_BAN_LEVEL} — играть в казино нельзя, "
+        "пока баланс не подрастёт."
     )
 
 
@@ -410,6 +421,38 @@ def apply_card(
         tg.send_message(ack_chat_id, f"Готово, карточка выдана: {target_name}.")
 
 
+def apply_debt_penalty(giver: dict, chat_id, before: int, after: int) -> None:
+    """Casino bets can be taken on credit; crossing a debt level punishes the spinner.
+
+    Only the most severe level newly crossed by this one spend fires — each
+    level is checked in order and returns, so a spin can't trigger two levels
+    at once, and a level already crossed by an earlier spin today is skipped
+    (`before` is no longer above it).
+    """
+    giver_name = display_name(giver)
+    storage.remember_participant(chat_id, giver["id"], giver_name)
+    header = f"💸 {giver_name} залезает в долг ({after} {KABANKOIN_EMOJI}) — "
+
+    if before > KABANKOIN_DEBT_BAN_LEVEL and after <= KABANKOIN_DEBT_BAN_LEVEL:
+        until = int(time.time()) + KABANKOIN_DEBT_BAN_SECONDS
+        try:
+            tg.restrict_chat_member(chat_id, giver["id"], until)
+            tg.send_message(chat_id, f"{header}бан на {format_duration(KABANKOIN_DEBT_BAN_SECONDS)}.")
+        except Exception:
+            tg.send_message(
+                chat_id, f"{header}бан не удался: {_mute_failure_reason(chat_id, giver['id'])}."
+            )
+        return
+
+    if before > KABANKOIN_DEBT_RED_LEVEL and after <= KABANKOIN_DEBT_RED_LEVEL:
+        apply_card(giver_name, chat_id, chat_id, giver["id"], giver_name, "red", "", header)
+        return
+
+    if before > KABANKOIN_DEBT_YELLOW_LEVEL and after <= KABANKOIN_DEBT_YELLOW_LEVEL:
+        apply_card(giver_name, chat_id, chat_id, giver["id"], giver_name, "yellow", "", header)
+        return
+
+
 # --- the slot machine behind /casino ----------------------------------------
 
 
@@ -439,13 +482,20 @@ def begin_casino_cards(giver: dict, chat_id, target_id, reason, dm_chat_id, mess
     giver_name = display_name(giver)
     target_name = storage.get_name(chat_id, target_id) or str(target_id)
 
-    spent, balance = storage.spend_kabankoins(
-        chat_id, giver["id"], current_day_key(), CASINO_CARDS_SPIN_COST, KABANKOIN_DAILY_AMOUNT
+    spent, before, after = storage.spend_kabankoins_on_credit(
+        chat_id,
+        giver["id"],
+        current_day_key(),
+        CASINO_CARDS_SPIN_COST,
+        KABANKOIN_DAILY_AMOUNT,
+        KABANKOIN_DEBT_BAN_LEVEL,
     )
     if not spent:
-        tg.edit_message_text(dm_chat_id, message_id, insufficient_balance_text(balance))
+        tg.edit_message_text(dm_chat_id, message_id, debt_limit_text())
         storage.clear_state(giver["id"])
         return
+    if after < 0:
+        apply_debt_penalty(giver, chat_id, before, after)
 
     # Each spin runs on its own reels, drawn from the full symbol set.
     symbols = random.sample(CASINO_SYMBOLS, CASINO_REEL_SYMBOLS)
@@ -783,12 +833,12 @@ def show_casino_target_picker(giver_id, dm_chat_id, message_id, chat_id, reason)
 
 def show_bet_picker(giver_id, dm_chat_id, message_id, chat_id, reason) -> None:
     balance = get_kabankoins(chat_id, giver_id)
-    if balance < CASINO_COINS_BET_MIN:
-        tg.edit_message_text(dm_chat_id, message_id, insufficient_balance_text(balance))
+    # Betting can dip into debt, but never past the floor in one bet.
+    max_bet = min(CASINO_COINS_BET_MAX, balance - KABANKOIN_DEBT_BAN_LEVEL)
+    if max_bet < CASINO_COINS_BET_MIN:
+        tg.edit_message_text(dm_chat_id, message_id, debt_limit_text())
         storage.clear_state(giver_id)
         return
-
-    max_bet = min(CASINO_COINS_BET_MAX, balance)
     buttons = [
         {"text": f"{n} {KABANKOIN_EMOJI}", "callback_data": f"cbet:{n}"}
         for n in range(CASINO_COINS_BET_MIN, max_bet + 1)
@@ -809,13 +859,16 @@ def resolve_coin_spin(giver, dm_chat_id, message_id, chat_id, bet, reason) -> No
     storage.clear_state(giver["id"])
     giver_name = display_name(giver)
 
-    spent, balance = storage.spend_kabankoins(
-        chat_id, giver["id"], current_day_key(), bet, KABANKOIN_DAILY_AMOUNT
+    spent, before, after = storage.spend_kabankoins_on_credit(
+        chat_id, giver["id"], current_day_key(), bet, KABANKOIN_DAILY_AMOUNT, KABANKOIN_DEBT_BAN_LEVEL
     )
     if not spent:
-        tg.edit_message_text(dm_chat_id, message_id, insufficient_balance_text(balance))
+        tg.edit_message_text(dm_chat_id, message_id, debt_limit_text())
         return
+    if after < 0:
+        apply_debt_penalty(giver, chat_id, before, after)
 
+    balance = after
     payout = roll_kabankoin_payout(bet)
     if payout > 0:
         balance = storage.add_kabankoins(
@@ -1375,6 +1428,12 @@ def handle_start(message: dict, args: str) -> None:
         f"Команду можно вызвать не чаще раза в "
         f"{format_duration(CASINO_COOLDOWN_SECONDS)}. Меню в обоих случаях "
         "открывается в личке с ботом.\n\n"
+        "Ставки принимаются и без денег на балансе — казино даёт в долг, "
+        f"до {KABANKOIN_DEBT_BAN_LEVEL} {KABANKOIN_EMOJI}. Долг "
+        f"{KABANKOIN_DEBT_YELLOW_LEVEL} — жёлтая карточка, {KABANKOIN_DEBT_RED_LEVEL} — "
+        f"красная, {KABANKOIN_DEBT_BAN_LEVEL} — бан на "
+        f"{format_duration(KABANKOIN_DEBT_BAN_SECONDS)} и больше играть нельзя, "
+        "пока баланс не подрастёт.\n\n"
         f"{PAY_COMMAND} <количество> — отправить кабанкоины другому участнику: "
         "ответом на сообщение, или без ответа — бот покажет список в личке.\n\n"
         f"{RENAME_COMMAND} — купить участнику тег администратора (виден рядом с "

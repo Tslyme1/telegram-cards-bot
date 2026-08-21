@@ -151,6 +151,24 @@ def spend_kabankoins(chat_id, user_id, day_key: str, amount: int, daily_amount: 
     return True, balance
 
 
+def spend_kabankoins_on_credit(
+    chat_id, user_id, day_key: str, amount: int, daily_amount: int, floor: int
+) -> tuple[bool, int, int]:
+    """Deduct `amount`, allowing the balance to go negative down to `floor`.
+
+    Unlike spend_kabankoins, this only refuses when the debt floor itself
+    would be breached, not merely for lack of funds. Returns (spent,
+    balance_before, balance_after) — on refusal, before and after are both
+    the unchanged current balance.
+    """
+    before = get_kabankoins(chat_id, user_id, day_key, daily_amount)
+    after = before - amount
+    if after < floor:
+        return False, before, before
+    kv.set(_key(f"coins:{day_key}", chat_id, user_id), after, ex=2 * 24 * 60 * 60)
+    return True, before, after
+
+
 def reset_kabankoins(chat_id, user_id, day_key: str) -> None:
     """Drop today's stored balance, so the next read falls back to the daily default."""
     kv.delete(_key(f"coins:{day_key}", chat_id, user_id))
