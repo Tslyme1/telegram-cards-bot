@@ -76,9 +76,13 @@ NICKNAME_MAX_LENGTH = 16
 # instead, down to KABANKOIN_DEBT_BAN_LEVEL. Crossing each level below
 # punishes the spinner in the group chat; once debt reaches the ban level,
 # further casino spins are refused until the balance recovers (a win, a
-# /pay, or the next day's reset). Spaced 5 apart on purpose: the biggest
+# /send, or the next day's reset). Spaced 5 apart on purpose: the biggest
 # single bet (CASINO_COINS_BET_MAX) can never jump past a level unnoticed.
 KABANKOIN_DEBT_YELLOW_LEVEL = -5
 KABANKOIN_DEBT_RED_LEVEL = -10
 KABANKOIN_DEBT_BAN_LEVEL = -15
-KABANKOIN_DEBT_BAN_SECONDS = 60 * 60
+KABANKOIN_DEBT_BAN_SECONDS = 24 * 60 * 60
+
+# Hitting the ban level offers a way out: "serve time" cuts the mute down to
+# this, and forgives the debt back to the daily default balance.
+KABANKOIN_JAIL_MUTE_SECONDS = 60 * 60

@@ -31,6 +31,7 @@ from config import (  # noqa: E402
     KABANKOIN_DEBT_BAN_SECONDS,
     KABANKOIN_DEBT_RED_LEVEL,
     KABANKOIN_DEBT_YELLOW_LEVEL,
+    KABANKOIN_JAIL_MUTE_SECONDS,
     KABANKOIN_PAYOUT_TIERS,
     MUTE_LADDER_SECONDS,
     NICKNAME_MAX_LENGTH,
@@ -437,7 +438,15 @@ def apply_debt_penalty(giver: dict, chat_id, before: int, after: int) -> None:
         until = int(time.time()) + KABANKOIN_DEBT_BAN_SECONDS
         try:
             tg.restrict_chat_member(chat_id, giver["id"], until)
-            tg.send_message(chat_id, f"{header}бан на {format_duration(KABANKOIN_DEBT_BAN_SECONDS)}.")
+            tg.send_message(
+                chat_id,
+                f"{header}бан на {format_duration(KABANKOIN_DEBT_BAN_SECONDS)}.",
+                reply_markup={
+                    "inline_keyboard": [
+                        [{"text": "🔒 Отсидеть в тюрьме", "callback_data": f"jail:{chat_id}:{giver['id']}"}]
+                    ]
+                },
+            )
         except Exception:
             tg.send_message(
                 chat_id, f"{header}бан не удался: {_mute_failure_reason(chat_id, giver['id'])}."
@@ -451,6 +460,22 @@ def apply_debt_penalty(giver: dict, chat_id, before: int, after: int) -> None:
     if before > KABANKOIN_DEBT_YELLOW_LEVEL and after <= KABANKOIN_DEBT_YELLOW_LEVEL:
         apply_card(giver_name, chat_id, chat_id, giver["id"], giver_name, "yellow", "", header)
         return
+
+
+def serve_jail_time(giver_id, giver_name: str, chat_id) -> None:
+    """Cut a debt ban down to a token sentence, forgiving the balance along with it."""
+    until = int(time.time()) + KABANKOIN_JAIL_MUTE_SECONDS
+    storage.reset_kabankoins(chat_id, giver_id, current_day_key())
+    try:
+        tg.restrict_chat_member(chat_id, giver_id, until)
+    except Exception:
+        app.logger.exception("Failed to shorten jail mute for %s in %s", giver_id, chat_id)
+    tg.send_message(
+        chat_id,
+        f"🔓 {giver_name} отсиживает своё — мут сокращён до "
+        f"{format_duration(KABANKOIN_JAIL_MUTE_SECONDS)}, баланс восстановлен до "
+        f"{KABANKOIN_DAILY_AMOUNT} {KABANKOIN_EMOJI}.",
+    )
 
 
 # --- the slot machine behind /casino ----------------------------------------
@@ -895,11 +920,11 @@ def resolve_coin_spin(giver, dm_chat_id, message_id, chat_id, bet, reason) -> No
     )
 
 
-# --- /pay: send kabankoins to another participant --------------------------
+# --- /send: send kabankoins to another participant --------------------------
 
 
 def start_pay_flow(giver: dict, dm_chat_id, amount: int | None) -> None:
-    """Entry point for /pay from the bot's DM: pick a chat first if there are several."""
+    """Entry point for /send from the bot's DM: pick a chat first if there are several."""
     chats = storage.list_user_chats(giver["id"])
     if not chats:
         tg.send_message(
@@ -1433,7 +1458,9 @@ def handle_start(message: dict, args: str) -> None:
         f"{KABANKOIN_DEBT_YELLOW_LEVEL} — жёлтая карточка, {KABANKOIN_DEBT_RED_LEVEL} — "
         f"красная, {KABANKOIN_DEBT_BAN_LEVEL} — бан на "
         f"{format_duration(KABANKOIN_DEBT_BAN_SECONDS)} и больше играть нельзя, "
-        "пока баланс не подрастёт.\n\n"
+        "пока баланс не подрастёт. С баном приходит кнопка «Отсидеть в тюрьме» — "
+        f"сокращает его до {format_duration(KABANKOIN_JAIL_MUTE_SECONDS)} и сразу "
+        f"восстанавливает баланс до {KABANKOIN_DAILY_AMOUNT} {KABANKOIN_EMOJI}.\n\n"
         f"{PAY_COMMAND} <количество> — отправить кабанкоины другому участнику: "
         "ответом на сообщение, или без ответа — бот покажет список в личке.\n\n"
         f"{RENAME_COMMAND} — купить участнику тег администратора (виден рядом с "
@@ -1449,7 +1476,7 @@ GIVE_COMMAND = "/card"
 GREEN_COMMAND = "/green"
 CASINO_COMMAND = "/casino"
 LIST_COMMAND = "/list"
-PAY_COMMAND = "/pay"
+PAY_COMMAND = "/send"
 RENAME_COMMAND = "/rename"
 
 COMMAND_FOR_KIND = {
@@ -1470,6 +1497,7 @@ COMMANDS = {
     "/yellow": handle_yellow,
     "/cards": handle_cards,
     "/kabany": handle_cards,
+    "/pay": handle_pay,
     "/start": handle_start,
     "/help": handle_start,
 }
@@ -1505,6 +1533,19 @@ def _handle_callback(callback: dict) -> None:
         else:
             text = "Это не ваша карточка."
         tg.answer_callback_query(callback["id"], text)
+        return
+
+    # The jail button rides on a message posted in the group for everyone to
+    # see, but only the person it muted may use it — the target user id is
+    # embedded in the callback data itself, so no stored state is needed.
+    if data.startswith("jail:"):
+        _, jail_chat_id, jail_user_id = data.split(":", 2)
+        if str(user["id"]) != jail_user_id:
+            tg.answer_callback_query(callback["id"], "Это не ваша отсидка.")
+            return
+        tg.answer_callback_query(callback["id"])
+        serve_jail_time(jail_user_id, display_name(user), jail_chat_id)
+        tg.edit_message_text(dm_chat_id, message_id, "🔓 Вы отсидели своё — мут сокращён, баланс восстановлен.")
         return
 
     tg.answer_callback_query(callback["id"])
