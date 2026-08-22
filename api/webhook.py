@@ -140,14 +140,22 @@ def debt_limit_text() -> str:
     )
 
 
-def roll_kabankoin_payout(bet: int) -> int:
-    """Pick a payout tier, weighted by bet, then roll a value inside it."""
+KABANKOIN_JACKPOT_MULTIPLIER = max(m for m, _, _ in KABANKOIN_PAYOUT_TIERS)
+
+
+def roll_kabankoin_payout(bet: int) -> tuple[int, int]:
+    """Roll a payout multiplier, weighted by bet. Returns (payout, multiplier).
+
+    The payout scales with the stake, so the house edge is the same whether
+    someone bets one coin or five — a large balance buys bigger swings, never
+    a better return.
+    """
     span = CASINO_COINS_BET_MAX - CASINO_COINS_BET_MIN
     t = (bet - CASINO_COINS_BET_MIN) / span if span else 0
-    tiers = [(lo, hi) for lo, hi, _, _ in KABANKOIN_PAYOUT_TIERS]
-    weights = [w_min + (w_max - w_min) * t for _, _, w_min, w_max in KABANKOIN_PAYOUT_TIERS]
-    lo, hi = random.choices(tiers, weights=weights)[0]
-    return random.randint(lo, hi)
+    multipliers = [m for m, _, _ in KABANKOIN_PAYOUT_TIERS]
+    weights = [w_min + (w_max - w_min) * t for _, w_min, w_max in KABANKOIN_PAYOUT_TIERS]
+    multiplier = random.choices(multipliers, weights=weights)[0]
+    return bet * multiplier, multiplier
 
 
 def _plural(count: int, one: str, few: str, many: str) -> str:
@@ -920,22 +928,25 @@ def resolve_coin_spin(giver, dm_chat_id, message_id, chat_id, bet, reason) -> No
         apply_debt_penalty(giver, chat_id, before, after)
 
     balance = after
-    payout = roll_kabankoin_payout(bet)
+    payout, multiplier = roll_kabankoin_payout(bet)
     if payout > 0:
         balance = storage.add_kabankoins(
             chat_id, giver["id"], current_day_key(), payout, KABANKOIN_DAILY_AMOUNT
         )
 
-    jackpot = payout == 100
-    if payout == 0:
+    if multiplier == 0:
         outcome = "ничего не выпало 😢"
-    elif jackpot:
-        outcome = f"выпадает {payout} 🎉 ДЖЕКПОТ!"
+    elif multiplier == 1:
+        outcome = f"ставка возвращается — {payout}"
+    elif multiplier == KABANKOIN_JACKPOT_MULTIPLIER:
+        outcome = f"×{multiplier} — {payout} 🎉 ДЖЕКПОТ!"
     else:
-        outcome = f"выпадает {payout}"
+        outcome = f"×{multiplier} — {payout}"
 
     tg.edit_message_text(
-        dm_chat_id, message_id, f"{KABANKOIN_EMOJI} {'Пусто' if payout == 0 else f'Выпало: {payout}'}"
+        dm_chat_id,
+        message_id,
+        f"{KABANKOIN_EMOJI} {'Пусто' if payout == 0 else f'Выпало: ×{multiplier} — {payout}'}",
     )
 
     details = f"\nПричина: {reason}" if reason else ""
@@ -1445,6 +1456,35 @@ def handle_reset_coins(message: dict, args: str) -> None:
     )
 
 
+def handle_give_coins(message: dict, args: str) -> None:
+    """Hand every known participant a one-off bonus on top of their balance."""
+    chat = message["chat"]
+    if chat.get("type") not in GROUP_TYPES:
+        tg.send_message(chat["id"], "Эта команда работает в групповом чате.")
+        return
+
+    giver = message["from"]
+    status = tg.get_chat_member_status(chat["id"], giver["id"])
+    if status not in ("creator", "administrator"):
+        tg.send_message(
+            chat["id"],
+            "Раздавать кабанкоины может только администратор чата.",
+            message["message_id"],
+        )
+        return
+
+    amount = _parse_amount(args) or GIVE_COINS_DEFAULT
+    day_key = current_day_key()
+    participants = storage.list_participants(chat["id"])
+    for uid, _ in participants:
+        storage.add_kabankoins(chat["id"], uid, day_key, amount, KABANKOIN_DAILY_AMOUNT)
+
+    tg.send_message(
+        chat["id"],
+        f"{KABANKOIN_EMOJI} Всем по {amount} — начислено {len(participants)} участникам.",
+    )
+
+
 def handle_start(message: dict, args: str) -> None:
     tg.send_message(
         message["chat"]["id"],
@@ -1477,8 +1517,12 @@ def handle_start(message: dict, args: str) -> None:
         "карточка достаётся вам; мимо — участник получает карточку случайного "
         "цвета, красная выпадает реже остальных.\n"
         f"• {KABANKOIN_EMOJI} Кабанкоин — ставка от {CASINO_COINS_BET_MIN} до "
-        f"{CASINO_COINS_BET_MAX} {KABANKOIN_EMOJI}, выигрыш от 1 до 100 (100 — "
-        "джекпот). Чем больше ставка, тем выше шанс на крупный выигрыш.\n\n"
+        f"{CASINO_COINS_BET_MAX} {KABANKOIN_EMOJI}. Выигрыш кратен ставке: "
+        + ", ".join(f"×{m}" for m, _, _ in KABANKOIN_PAYOUT_TIERS if m)
+        + f" (×{KABANKOIN_JACKPOT_MULTIPLIER} — джекпот, на максимальной ставке "
+        "это 100). Чаще всего ставка сгорает: казино в плюсе примерно на 8% "
+        "от оборота, так что бесконечно раскручиваться не выйдет. Ставка "
+        "побольше — попаданий реже, но они крупнее, и джекпот вдвое вероятнее.\n\n"
         f"Команду можно вызвать не чаще раза в "
         f"{format_duration(CASINO_COOLDOWN_SECONDS)}. Меню в обоих случаях "
         "открывается в личке с ботом.\n\n"
@@ -1508,6 +1552,9 @@ LIST_COMMAND = "/list"
 PAY_COMMAND = "/send"
 TAG_COMMAND = "/tag"
 
+# Default handout for /givecoins when no amount is given.
+GIVE_COINS_DEFAULT = 25
+
 COMMAND_FOR_KIND = {
     "yellow": GIVE_COMMAND,
     "green": GREEN_COMMAND,
@@ -1522,6 +1569,7 @@ COMMANDS = {
     PAY_COMMAND: handle_pay,
     TAG_COMMAND: handle_tag,
     "/resetcoins": handle_reset_coins,
+    "/givecoins": handle_give_coins,
     # Previous names, kept working as aliases.
     "/yellow": handle_yellow,
     "/cards": handle_cards,

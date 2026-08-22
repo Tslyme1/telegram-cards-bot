@@ -34,22 +34,26 @@ CASINO_CARDS_SPIN_COST = 1
 CASINO_COINS_BET_MIN = 1
 CASINO_COINS_BET_MAX = 5
 
-# Payout tiers for the coin casino: (low, high, weight at minimum bet, weight
-# at maximum bet). Weights are interpolated by bet size and used with
-# random.choices, so they don't need to be normalised, but each column here
-# sums to 100 to make the percentages easy to read directly. Modelled on a
-# real slot machine's pay table: the bet can come back as nothing at all,
-# small wins are the next most common outcome, the jackpot (100) is rare, and
-# a bigger bet buys both a lower bust chance and better odds at the top
-# tiers, without touching the payout amounts themselves.
+# Pay table for the coin casino: (payout multiplier, weight at minimum bet,
+# weight at maximum bet). The payout is bet * multiplier, which is what keeps
+# the house edge honest — an earlier version paid a flat 1..100 coins no
+# matter the stake, so a one-coin spin returned ~8 on average and any balance
+# grew on its own.
+#
+# Weights are interpolated by bet size and fed to random.choices, so they need
+# not be normalised, but each column sums to 100 to be readable as percentages.
+# Expected return is ~0.91 of the stake at the minimum bet and ~0.92 at the
+# maximum: every bet size loses money over time, so no stake and no bankroll
+# can be ground upwards, while a single session still swings either way often
+# enough to be worth playing. A bigger bet buys fewer but heavier wins and a
+# jackpot twice as likely — at the maximum bet the 20x jackpot pays 100.
 KABANKOIN_PAYOUT_TIERS = [
-    (0, 0, 30, 10),  # the bet is lost outright
-    (1, 10, 48, 40),
-    (11, 25, 17, 30),
-    (26, 50, 4.5, 15),
-    (51, 80, 0.4, 4),
-    (81, 99, 0.08, 0.9),
-    (100, 100, 0.02, 0.1),  # the jackpot
+    (0, 58, 64),  # the stake is lost
+    (1, 22, 16),  # the stake comes back
+    (2, 13.5, 12),
+    (5, 5, 6.4),
+    (10, 1.3, 1.2),
+    (20, 0.2, 0.4),  # the jackpot
 ]
 
 # Each red card earned the same day mutes for longer than the previous one;
