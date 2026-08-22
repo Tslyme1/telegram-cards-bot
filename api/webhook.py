@@ -122,10 +122,15 @@ def get_kabankoins(chat_id, user_id) -> int:
 
 
 def insufficient_balance_text(balance: int) -> str:
-    return (
-        f"{KABANKOIN_EMOJI} Не хватает кабанкоинов (баланс: {balance}). "
-        f"Обновится через {format_duration(seconds_until_day_reset())}."
-    )
+    text = f"{KABANKOIN_EMOJI} Не хватает кабанкоинов (баланс: {balance})."
+    # Midnight only lifts a balance that sits below the daily allowance, so
+    # promising a top-up to someone already above it would be a lie.
+    if balance < KABANKOIN_DAILY_AMOUNT:
+        text += (
+            f" Через {format_duration(seconds_until_day_reset())} баланс "
+            f"пополнится до {KABANKOIN_DAILY_AMOUNT}."
+        )
+    return text
 
 
 def debt_limit_text() -> str:
@@ -1459,8 +1464,11 @@ def handle_start(message: dict, args: str) -> None:
         "и гасит будущие жёлтые, по одной за раз. Больше "
         f"{GREEN_IMMUNITY_LIMIT} неиспользованных не накопить. Выдавать можно "
         f"не чаще раза в {format_duration(GREEN_COOLDOWN_SECONDS)}.\n\n"
-        f"{KABANKOIN_EMOJI} У каждого свои кабанкоины — {KABANKOIN_DAILY_AMOUNT} в день "
-        "на чат, обновляются каждую полночь. Тратятся на прокрутки казино.\n\n"
+        f"{KABANKOIN_EMOJI} У каждого свои кабанкоины — свой баланс на чат. "
+        f"Каждую полночь он подтягивается до {KABANKOIN_DAILY_AMOUNT}, если "
+        f"опустился ниже (долг тоже списывается); всё, что выше "
+        f"{KABANKOIN_DAILY_AMOUNT}, остаётся и копится дальше. Тратятся на "
+        "прокрутки казино.\n\n"
         f"{CASINO_COMMAND} — казино, два типа на выбор:\n"
         f"• 🎴 Карточное (1 {KABANKOIN_EMOJI} за прокрутку) — выберите участника, "
         f"затем соберите комбинацию из {CASINO_SLOTS} символов, взятых на эту "

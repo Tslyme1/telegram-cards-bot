@@ -136,9 +136,34 @@ def list_cards(chat_id) -> list[tuple[str, int, int, int]]:
     return rows
 
 
+def _set_balance(chat_id, user_id, balance: int) -> None:
+    """Store a balance. Deliberately without a TTL: it carries across days."""
+    kv.set(_key("coins", chat_id, user_id), balance)
+
+
 def get_kabankoins(chat_id, user_id, day_key: str, daily_amount: int) -> int:
-    raw = kv.get(_key(f"coins:{day_key}", chat_id, user_id))
-    return int(raw) if raw is not None else daily_amount
+    """Read the balance, topping it up first if today's top-up hasn't run yet.
+
+    The balance itself persists across days — winnings stay won. What the new
+    day does is lift anyone *below* the daily allowance back up to it (a debt
+    included), and leave anyone above it untouched.
+
+    The top-up is applied lazily, on the first read of the day, because the
+    bot has no scheduled execution: it only ever reacts to incoming updates.
+    Every other kabankoin function reads through here, so no path can spend or
+    add against a stale, un-topped-up balance.
+    """
+    raw = kv.get(_key("coins", chat_id, user_id))
+    balance = int(raw) if raw is not None else daily_amount
+
+    if kv.get(_key("topup", chat_id, user_id)) == day_key:
+        return balance
+
+    if balance < daily_amount:
+        balance = daily_amount
+    _set_balance(chat_id, user_id, balance)
+    kv.set(_key("topup", chat_id, user_id), day_key)
+    return balance
 
 
 def spend_kabankoins(chat_id, user_id, day_key: str, amount: int, daily_amount: int) -> tuple[bool, int]:
@@ -147,7 +172,7 @@ def spend_kabankoins(chat_id, user_id, day_key: str, amount: int, daily_amount: 
     if balance < amount:
         return False, balance
     balance -= amount
-    kv.set(_key(f"coins:{day_key}", chat_id, user_id), balance, ex=2 * 24 * 60 * 60)
+    _set_balance(chat_id, user_id, balance)
     return True, balance
 
 
@@ -165,18 +190,19 @@ def spend_kabankoins_on_credit(
     after = before - amount
     if after < floor:
         return False, before, before
-    kv.set(_key(f"coins:{day_key}", chat_id, user_id), after, ex=2 * 24 * 60 * 60)
+    _set_balance(chat_id, user_id, after)
     return True, before, after
 
 
 def reset_kabankoins(chat_id, user_id, day_key: str) -> None:
-    """Drop today's stored balance, so the next read falls back to the daily default."""
-    kv.delete(_key(f"coins:{day_key}", chat_id, user_id))
+    """Drop the stored balance, so the next read falls back to the daily default."""
+    kv.delete(_key("coins", chat_id, user_id))
+    kv.delete(_key("topup", chat_id, user_id))
 
 
 def add_kabankoins(chat_id, user_id, day_key: str, amount: int, daily_amount: int) -> int:
     balance = get_kabankoins(chat_id, user_id, day_key, daily_amount) + amount
-    kv.set(_key(f"coins:{day_key}", chat_id, user_id), balance, ex=2 * 24 * 60 * 60)
+    _set_balance(chat_id, user_id, balance)
     return balance
 
 
