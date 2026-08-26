@@ -10,6 +10,7 @@ that actually want to be on the same team.
 """
 
 import itertools
+import math
 import random
 import re
 from typing import NamedTuple
@@ -103,47 +104,142 @@ ARCHETYPES = [
 ]
 
 
-# Heroes outside the archetype pools, so that locking in any real hero still
-# lands on a sane position. Values are the positions each one commonly plays.
-EXTRA_HEROES = {
+# Which positions each hero actually plays — the whole roster, not just the
+# heroes used by the plans above.
+#
+# This is deliberately kept apart from the pools. A pool says "this plan wants
+# this hero in this slot"; that is a much narrower statement than "this is the
+# only slot the hero can play". Deriving roles from pool membership pinned
+# every hero to a single position forever — Pudge sat in the pickoff plan's
+# position 4, so a player asking for Pudge always got a roamer and never a
+# midlaner.
+HERO_POSITIONS = {
+    "Abaddon": [3, 4, 5],
     "Alchemist": [1, 3],
-    "Ancient Apparition": [5],
+    "Ancient Apparition": [4, 5],
+    "Anti-Mage": [1],
     "Arc Warden": [1, 2],
+    "Axe": [3],
+    "Bane": [4, 5],
+    "Batrider": [2, 3, 4],
+    "Beastmaster": [3, 4],
+    "Bloodseeker": [1, 3],
     "Bounty Hunter": [4],
     "Brewmaster": [3],
+    "Bristleback": [3],
     "Broodmother": [2, 3],
+    "Centaur Warrunner": [3],
     "Chaos Knight": [1],
+    "Chen": [4, 5],
     "Clinkz": [1, 2],
+    "Clockwerk": [3, 4],
+    "Crystal Maiden": [5],
+    "Dark Seer": [3],
+    "Dark Willow": [4, 5],
     "Dawnbreaker": [3, 4],
+    "Dazzle": [4, 5],
+    "Death Prophet": [2, 3],
+    "Disruptor": [5],
     "Doom": [3],
+    "Dragon Knight": [2, 3],
+    "Drow Ranger": [1],
+    "Earth Spirit": [4],
+    "Earthshaker": [3, 4, 5],
     "Elder Titan": [3, 4],
+    "Ember Spirit": [2],
+    "Enchantress": [4, 5],
+    "Enigma": [3, 4],
+    "Faceless Void": [1],
+    "Grimstroke": [4, 5],
+    "Gyrocopter": [1, 4],
+    "Hoodwink": [4],
     "Huskar": [1, 2, 3],
+    "Invoker": [2],
     "Io": [4, 5],
+    "Jakiro": [4, 5],
+    "Juggernaut": [1],
+    "Keeper of the Light": [4, 5],
     "Kez": [1, 2],
+    "Kunkka": [2, 3],
+    "Legion Commander": [3, 4],
+    "Leshrac": [2, 3],
+    "Lich": [5],
+    "Lifestealer": [1],
+    "Lina": [2, 4],
+    "Lion": [4, 5],
     "Lone Druid": [1, 3],
+    "Luna": [1],
+    "Lycan": [1, 3],
+    "Magnus": [3, 4],
+    "Marci": [1, 3, 4],
+    "Mars": [3],
+    "Medusa": [1],
     "Meepo": [1, 2],
     "Mirana": [1, 4],
+    "Monkey King": [1, 3],
     "Morphling": [1, 2],
     "Muerta": [1, 2],
+    "Naga Siren": [1, 5],
+    "Nature's Prophet": [1, 3, 4],
     "Necrophos": [2, 3],
+    "Night Stalker": [3, 4],
+    "Nyx Assassin": [4],
+    "Ogre Magi": [4, 5],
+    "Omniknight": [3, 5],
+    "Oracle": [4, 5],
+    "Outworld Destroyer": [2],
+    "Pangolier": [2, 3],
+    "Phantom Assassin": [1],
     "Phantom Lancer": [1],
+    "Phoenix": [3, 4],
     "Primal Beast": [3],
+    "Puck": [2],
+    "Pudge": [2, 3, 4],
     "Pugna": [2, 4, 5],
+    "Queen of Pain": [2],
+    "Razor": [2, 3],
     "Riki": [1, 4],
     "Ringmaster": [4, 5],
-    "Rubick": [5],
+    "Rubick": [4, 5],
     "Sand King": [3, 4],
+    "Shadow Demon": [4, 5],
     "Shadow Fiend": [2],
+    "Shadow Shaman": [4, 5],
     "Silencer": [4, 5],
     "Skywrath Mage": [5],
+    "Slardar": [3],
+    "Slark": [1],
+    "Snapfire": [4, 5],
     "Sniper": [1, 2],
+    "Spectre": [1],
+    "Spirit Breaker": [4],
+    "Storm Spirit": [2],
+    "Sven": [1, 3],
     "Techies": [4, 5],
+    "Templar Assassin": [1, 2],
+    "Terrorblade": [1],
+    "Tidehunter": [3],
+    "Timbersaw": [3],
+    "Tinker": [2],
+    "Tiny": [2, 3, 4],
     "Treant Protector": [5],
     "Troll Warlord": [1],
+    "Tusk": [4],
+    "Underlord": [3],
+    "Undying": [4, 5],
+    "Ursa": [1],
+    "Vengeful Spirit": [4, 5],
+    "Venomancer": [3, 4],
+    "Viper": [2, 3],
+    "Visage": [3, 4],
+    "Void Spirit": [2],
+    "Warlock": [5],
     "Weaver": [1, 4],
     "Windranger": [2, 4],
+    "Winter Wyvern": [5],
     "Witch Doctor": [4, 5],
     "Wraith King": [1, 3],
+    "Zeus": [2],
 }
 
 # What people actually type instead of the full name.
@@ -197,7 +293,15 @@ ALIASES = {
 }
 
 POOL_HEROES = {hero for a in ARCHETYPES for pool in a["pools"].values() for hero in pool}
-ALL_HEROES = POOL_HEROES | set(EXTRA_HEROES)
+ALL_HEROES = POOL_HEROES | set(HERO_POSITIONS)
+
+# How strongly a seating that a plan already lists is preferred over one that
+# merely matches the hero's role. Finite on purpose: a hero with several roles
+# should turn up in all of them, not only in the one some plan happens to list.
+# Playing out of role scores zero, so it only happens when the heroes the
+# player named cannot all be seated properly (three carries, say).
+FIT_WEIGHTS = {2: 8, 1: 1, 0: 0}
+FIT_WEIGHTS_FORCED = {2: 8, 1: 1, 0: 0.05}
 
 
 class Draft(NamedTuple):
@@ -241,20 +345,26 @@ def parse_heroes(text: str, limit: int = len(POSITIONS)) -> list[str]:
     return [name for name in names if name][:limit]
 
 
-def natural_positions(hero: str, known: bool) -> list[int]:
-    """Positions this hero plausibly plays, as 1-based positions."""
-    spots = sorted(
-        {
-            position
-            for archetype in ARCHETYPES
-            for position, pool in archetype["pools"].items()
-            if hero in pool
-        }
-    )
-    if spots:
-        return spots
-    if known and hero in EXTRA_HEROES:
-        return EXTRA_HEROES[hero]
+def natural_positions(hero: str, known: bool = True) -> list[int]:
+    """Positions this hero plausibly plays, as 1-based positions.
+
+    Comes from HERO_POSITIONS rather than from pool membership, so a hero
+    keeps every role they actually play even when the plans only ever ask
+    them to fill one of them.
+    """
+    if hero in HERO_POSITIONS:
+        return HERO_POSITIONS[hero]
+    if known:
+        spots = sorted(
+            {
+                position
+                for archetype in ARCHETYPES
+                for position, pool in archetype["pools"].items()
+                if hero in pool
+            }
+        )
+        if spots:
+            return spots
     # Nothing to go on, so any slot is as good as another.
     return [position for position, _, _ in POSITIONS]
 
@@ -298,21 +408,33 @@ def roll_draft(locked_heroes: list[str] | str | None = None) -> Draft:
         archetype = random.choice(ARCHETYPES)
     else:
         seatings = [
-            (
-                sum(
-                    _fit(archetype, hero, known, index)
-                    for (hero, known), index in zip(resolved, indices)
-                ),
-                archetype_index,
-                indices,
-            )
-            for archetype_index, archetype in enumerate(ARCHETYPES)
+            (archetype_index, indices)
+            for archetype_index in range(len(ARCHETYPES))
             for indices in itertools.permutations(range(len(POSITIONS)), len(resolved))
         ]
-        best = max(score for score, _, _ in seatings)
-        archetype_index, indices = random.choice(
-            [(ai, idx) for score, ai, idx in seatings if score == best]
-        )
+        fits = [
+            [
+                _fit(ARCHETYPES[archetype_index], hero, known, index)
+                for (hero, known), index in zip(resolved, indices)
+            ]
+            for archetype_index, indices in seatings
+        ]
+
+        def weigh(table):
+            return [
+                math.prod(table[fit] for fit in seating_fits) for seating_fits in fits
+            ]
+
+        weights = weigh(FIT_WEIGHTS)
+        if not any(weights):
+            # No way to seat everyone in their own role — the names collide.
+            weights = weigh(FIT_WEIGHTS_FORCED)
+
+        # Weighted rather than best-only: the strongest seating is favoured but
+        # not guaranteed, so a hero with several roles is not nailed to one of
+        # them every single time. Multiplying the per-hero weights keeps the
+        # preference sharp when several heroes agree on the same plan.
+        archetype_index, indices = random.choices(seatings, weights=weights)[0]
         archetype = ARCHETYPES[archetype_index]
         for (hero, _), index in zip(resolved, indices):
             heroes[index] = hero
