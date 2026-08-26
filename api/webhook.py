@@ -10,6 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flask import Flask, jsonify, request  # noqa: E402
 
+import dota_draft  # noqa: E402
 import kv  # noqa: E402
 import storage_kv as storage  # noqa: E402
 import telegram_api as tg  # noqa: E402
@@ -24,6 +25,7 @@ from config import (  # noqa: E402
     CASINO_SLOTS,
     CASINO_SYMBOLS,
     DAY_RESET_UTC_OFFSET_HOURS,
+    DOTA_DRAFT_PRICE,
     GIVE_COOLDOWN_SECONDS,
     GREEN_COOLDOWN_SECONDS,
     GREEN_IMMUNITY_LIMIT,
@@ -1258,6 +1260,140 @@ def finish_tag(
         )
 
 
+# --- /bk: a rolled Dota line-up, revealed one hero at a time ----------------
+
+
+def draft_text(archetype: str, heroes: list[str], revealed: int) -> str:
+    """The draft board with `revealed` positions filled in and the rest hidden."""
+    lines = [f"🎲 Рейтинговый пик — «{archetype}»", ""]
+    for index, (position, label, emoji) in enumerate(dota_draft.POSITIONS):
+        hero = heroes[index] if index < revealed else "▫️ ???"
+        lines.append(f"{emoji} {label} ({position}): {hero}")
+    lines.append("")
+    lines.append(
+        f"Открыто {revealed} из {len(dota_draft.POSITIONS)}."
+        if revealed < len(dota_draft.POSITIONS)
+        else "Пик собран."
+    )
+    return "\n".join(lines)
+
+
+def draft_keyboard(revealed: int) -> dict:
+    left = len(dota_draft.POSITIONS) - revealed
+    _, label, emoji = dota_draft.POSITIONS[revealed]
+    return {
+        "inline_keyboard": [
+            [{"text": f"{emoji} Открыть {label.lower()} (осталось {left})", "callback_data": "bknext"}]
+        ]
+    }
+
+
+def start_bk_flow(giver: dict, dm_chat_id) -> None:
+    """Entry point for /bk from the bot's DM: pick a chat first if there are several."""
+    chats = storage.list_user_chats(giver["id"])
+    if not chats:
+        tg.send_message(
+            dm_chat_id,
+            "Я пока не знаю ни одного чата, где вы состоите.\n"
+            f"Напишите что-нибудь в группе, где я работаю, и повторите {BK_COMMAND}.",
+        )
+        return
+
+    if len(chats) == 1:
+        begin_draft(giver, chats[0][0], dm_chat_id)
+        return
+
+    keyboard = [[{"text": title, "callback_data": f"bkchat:{cid}"}] for cid, title in chats]
+    keyboard.append([CANCEL_BUTTON])
+    sent = tg.send_message(
+        dm_chat_id,
+        f"За чей баланс крутим пик ({DOTA_DRAFT_PRICE} {KABANKOIN_EMOJI})?",
+        reply_markup={"inline_keyboard": keyboard},
+    )
+    storage.set_state(giver["id"], {"step": "bk_chat", "message_id": sent.get("message_id")})
+
+
+def begin_draft(giver: dict, chat_id, dm_chat_id, message_id=None) -> None:
+    """Charge for a draft, roll it whole, and open the reveal board in the DM."""
+    spent, balance = storage.spend_kabankoins(
+        chat_id, giver["id"], current_day_key(), DOTA_DRAFT_PRICE, KABANKOIN_DAILY_AMOUNT
+    )
+    if not spent:
+        text = insufficient_balance_text(balance)
+        if message_id is None:
+            send_to_dm(giver, chat_id, text)
+        else:
+            tg.edit_message_text(dm_chat_id, message_id, text)
+        storage.clear_state(giver["id"])
+        return
+
+    # Rolled in full before the first reveal, so the line-up cannot drift
+    # between button presses.
+    archetype, plan, heroes = dota_draft.roll_draft()
+    text = draft_text(archetype, heroes, 0)
+    keyboard = draft_keyboard(0)
+
+    if message_id is None:
+        sent = send_to_dm(giver, chat_id, text, keyboard)
+        if sent is None:
+            # The DM never arrived — nothing was delivered, so nothing is owed.
+            storage.add_kabankoins(
+                chat_id, giver["id"], current_day_key(), DOTA_DRAFT_PRICE, KABANKOIN_DAILY_AMOUNT
+            )
+            storage.clear_state(giver["id"])
+            return
+        message_id = sent.get("message_id")
+    else:
+        tg.edit_message_text(dm_chat_id, message_id, text, reply_markup=keyboard)
+
+    storage.set_state(
+        giver["id"],
+        {
+            "step": "bk_reveal",
+            "chat_id": str(chat_id),
+            "archetype": archetype,
+            "plan": plan,
+            "heroes": heroes,
+            "revealed": 0,
+            "balance": balance,
+            "message_id": message_id,
+        },
+    )
+
+
+def reveal_next_hero(giver: dict, state: dict, dm_chat_id, message_id) -> None:
+    revealed = state["revealed"] + 1
+    total = len(dota_draft.POSITIONS)
+    archetype, heroes = state["archetype"], state["heroes"]
+
+    if revealed < total:
+        state["revealed"] = revealed
+        storage.set_state(giver["id"], state)
+        tg.edit_message_text(
+            dm_chat_id,
+            message_id,
+            draft_text(archetype, heroes, revealed),
+            reply_markup=draft_keyboard(revealed),
+        )
+        return
+
+    storage.clear_state(giver["id"])
+    tg.edit_message_text(dm_chat_id, message_id, draft_text(archetype, heroes, total))
+
+    chat_id = state["chat_id"]
+    roster = "\n".join(
+        f"{emoji} {label} ({position}): {hero}"
+        for (position, label, emoji), hero in zip(dota_draft.POSITIONS, heroes)
+    )
+    tg.send_message(
+        chat_id,
+        f"🎲 {display_name(giver)} выкупает рейтинговый пик — «{archetype}»\n\n"
+        f"{roster}\n\n"
+        f"План: {state['plan']}\n"
+        f"Баланс: {state['balance']} {KABANKOIN_EMOJI}",
+    )
+
+
 # --- commands ---------------------------------------------------------------
 
 
@@ -1427,6 +1563,17 @@ def handle_tag(message: dict, args: str) -> None:
     show_tag_target_picker(giver, chat["id"], chat["id"], None)
 
 
+def handle_bk(message: dict, args: str) -> None:
+    chat = message["chat"]
+    giver = message["from"]
+
+    if chat.get("type") not in GROUP_TYPES:
+        start_bk_flow(giver, chat["id"])
+        return
+
+    begin_draft(giver, chat["id"], chat["id"])
+
+
 def handle_reset_coins(message: dict, args: str) -> None:
     """Force every known participant's kabankoin balance back to the daily default."""
     chat = message["chat"]
@@ -1541,6 +1688,10 @@ def handle_start(message: dict, args: str) -> None:
         + ", ".join(f"{price} {KABANKOIN_EMOJI} на {format_duration(s)}" for s, price in TAG_PRICE_TIERS)
         + f". Тег до {TAG_MAX_LENGTH} символов, без эмодзи, снимается ботом при "
         "первом сообщении в чате после истечения срока.\n\n"
+        f"{BK_COMMAND} — рейтинговый пик Dota за {DOTA_DRAFT_PRICE} {KABANKOIN_EMOJI}: "
+        f"бот в личке открывает состав по одному герою, {len(dota_draft.POSITIONS)} "
+        "нажатия. Роли всегда 1-2-3-4-5 по разу, а герои берутся из одного "
+        "плана на игру, так что состав получается осмысленным.\n\n"
         f"{LIST_COMMAND} — список карточек участников чата.",
     )
 
@@ -1551,6 +1702,7 @@ CASINO_COMMAND = "/casino"
 LIST_COMMAND = "/list"
 PAY_COMMAND = "/send"
 TAG_COMMAND = "/tag"
+BK_COMMAND = "/bk"
 
 # Default handout for /givecoins when no amount is given.
 GIVE_COINS_DEFAULT = 25
@@ -1568,6 +1720,7 @@ COMMANDS = {
     LIST_COMMAND: handle_cards,
     PAY_COMMAND: handle_pay,
     TAG_COMMAND: handle_tag,
+    BK_COMMAND: handle_bk,
     "/resetcoins": handle_reset_coins,
     "/givecoins": handle_give_coins,
     # Previous names, kept working as aliases.
@@ -1599,6 +1752,7 @@ def _handle_callback(callback: dict) -> None:
         (
             "gu:", "sl:", "cchat:", "ctype:", "cuser:", "cbet:",
             "paychat:", "payuser:", "tagchat:", "taguser:", "tagtier:",
+            "bkchat:", "bknext",
         )
     ) or (data == "cancel" and message["chat"].get("type") in GROUP_TYPES)
     if needs_state and not state:
@@ -1608,6 +1762,8 @@ def _handle_callback(callback: dict) -> None:
             text = "Это не ваш перевод."
         elif data.startswith(("tagchat:", "taguser:", "tagtier:")):
             text = "Это не ваш тег."
+        elif data.startswith(("bkchat:", "bknext")):
+            text = "Это не ваш пик."
         else:
             text = "Это не ваша карточка."
         tg.answer_callback_query(callback["id"], text)
@@ -1766,6 +1922,20 @@ def _handle_callback(callback: dict) -> None:
         ask_tag_text(
             user["id"], dm_chat_id, message_id, state["chat_id"], state["target_id"], int(seconds), int(price)
         )
+        return
+
+    if data.startswith("bkchat:"):
+        if state.get("step") != "bk_chat" or state.get("message_id") != message_id:
+            tg.edit_message_text(dm_chat_id, message_id, f"Устарело, начните заново: {BK_COMMAND}")
+            return
+        begin_draft(user, data.split(":", 1)[1], dm_chat_id, message_id)
+        return
+
+    if data == "bknext":
+        if state.get("step") != "bk_reveal" or state.get("message_id") != message_id:
+            tg.edit_message_text(dm_chat_id, message_id, f"Устарело, начните заново: {BK_COMMAND}")
+            return
+        reveal_next_hero(user, state, dm_chat_id, message_id)
         return
 
     if data == "noreason":

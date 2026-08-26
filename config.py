@@ -77,6 +77,9 @@ TAG_PRICE_TIERS = [
 # Telegram's own limits on setChatMemberTag: 16 characters, no emoji.
 TAG_MAX_LENGTH = 16
 
+# One rolled Dota line-up for a ranked match, revealed a hero at a time.
+DOTA_DRAFT_PRICE = 50
+
 # Casino bets no longer get refused for lack of funds — they can go into debt
 # instead, down to KABANKOIN_DEBT_BAN_LEVEL. Crossing each level below
 # punishes the spinner in the group chat; once debt reaches the ban level,
