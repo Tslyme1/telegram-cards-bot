@@ -1611,11 +1611,12 @@ def handle_give_coins(message: dict, args: str) -> None:
         return
 
     giver = message["from"]
-    status = tg.get_chat_member_status(chat["id"], giver["id"])
-    if status not in ("creator", "administrator"):
+    # Minting coins out of nothing is stronger than the other admin commands,
+    # so it stops at the owner rather than any administrator.
+    if tg.get_chat_member_status(chat["id"], giver["id"]) != "creator":
         tg.send_message(
             chat["id"],
-            "Раздавать кабанкоины может только администратор чата.",
+            "Раздавать кабанкоины может только владелец чата.",
             message["message_id"],
         )
         return
