@@ -9,6 +9,7 @@ are always 1-2-3-4-5 exactly once, and the heroes that land together are ones
 that actually want to be on the same team.
 """
 
+import itertools
 import random
 import re
 from typing import NamedTuple
@@ -203,10 +204,10 @@ class Draft(NamedTuple):
     archetype: str
     plan: str
     heroes: list[str]
-    # Index into POSITIONS of the hero the player asked for, or None.
-    locked_index: int | None
-    # False when the locked hero is not one we know — the role was then a guess.
-    known: bool
+    # Indices into POSITIONS of the heroes the player asked for.
+    locked: list[int]
+    # Names we did not recognise — their roles were a guess.
+    unknown: list[str]
 
 
 def _norm(name: str) -> str:
@@ -234,47 +235,88 @@ def resolve_hero(name: str) -> tuple[str, bool]:
     return " ".join(name.split())[:32], False
 
 
-def _placements(hero: str, known: bool) -> list[tuple[int, int]]:
-    """Every (archetype, position index) the hero could legitimately fill."""
-    spots = [
-        (index, position - 1)
-        for index, archetype in enumerate(ARCHETYPES)
-        for position, pool in archetype["pools"].items()
-        if hero in pool
-    ]
+def parse_heroes(text: str, limit: int = len(POSITIONS)) -> list[str]:
+    """Split a typed line into hero names — commas or newlines separate them."""
+    names = [part.strip() for part in re.split(r"[,\n;]+", text or "")]
+    return [name for name in names if name][:limit]
+
+
+def natural_positions(hero: str, known: bool) -> list[int]:
+    """Positions this hero plausibly plays, as 1-based positions."""
+    spots = sorted(
+        {
+            position
+            for archetype in ARCHETYPES
+            for position, pool in archetype["pools"].items()
+            if hero in pool
+        }
+    )
     if spots:
         return spots
-
-    positions = EXTRA_HEROES.get(hero) if known else None
-    if not positions:
-        # Nothing to go on, so any slot is as good as another.
-        positions = [position for position, _, _ in POSITIONS]
-    return [
-        (index, position - 1)
-        for index in range(len(ARCHETYPES))
-        for position in positions
-    ]
+    if known and hero in EXTRA_HEROES:
+        return EXTRA_HEROES[hero]
+    # Nothing to go on, so any slot is as good as another.
+    return [position for position, _, _ in POSITIONS]
 
 
-def roll_draft(locked_hero: str | None = None) -> Draft:
-    """Roll a full line-up, optionally built around a hero the player named.
+def _fit(archetype: dict, hero: str, known: bool, index: int) -> int:
+    """How well a hero sits at one position of one plan. Higher is better."""
+    position = index + 1
+    if hero in archetype["pools"][position]:
+        return 2  # right role and part of this plan already
+    if position in natural_positions(hero, known):
+        return 1  # right role, borrowed into this plan
+    return 0  # forced
+
+
+def roll_draft(locked_heroes: list[str] | str | None = None) -> Draft:
+    """Roll a full line-up, optionally built around heroes the player named.
 
     The whole draft is rolled at once, before the first reveal, so the line-up
-    cannot drift between button presses. A locked hero fixes both the position
-    it occupies and the plan the rest of the team is drawn from, so the other
-    four are picked to go with it rather than around it.
-    """
-    heroes: list[str | None] = [None] * len(POSITIONS)
-    locked_index = None
-    known = True
+    cannot drift between button presses.
 
-    if locked_hero:
-        hero, known = resolve_hero(locked_hero)
-        archetype_index, locked_index = random.choice(_placements(hero, known))
-        archetype = ARCHETYPES[archetype_index]
-        heroes[locked_index] = hero
-    else:
+    With heroes locked in, the plan is not chosen at random: every plan is
+    scored on how well it can seat all of them at once — each on a position it
+    actually plays, no two on the same one — and the best-fitting plan wins.
+    Their team-mates are then drawn from that plan, so the rest of the draft is
+    picked to go with them rather than merely around them.
+    """
+    if isinstance(locked_heroes, str):
+        locked_heroes = [locked_heroes]
+
+    resolved: list[tuple[str, bool]] = []
+    for name in locked_heroes or []:
+        hero, known = resolve_hero(name)
+        if all(hero != already for already, _ in resolved):
+            resolved.append((hero, known))
+    resolved = resolved[: len(POSITIONS)]
+
+    heroes: list[str | None] = [None] * len(POSITIONS)
+    locked: list[int] = []
+
+    if not resolved:
         archetype = random.choice(ARCHETYPES)
+    else:
+        seatings = [
+            (
+                sum(
+                    _fit(archetype, hero, known, index)
+                    for (hero, known), index in zip(resolved, indices)
+                ),
+                archetype_index,
+                indices,
+            )
+            for archetype_index, archetype in enumerate(ARCHETYPES)
+            for indices in itertools.permutations(range(len(POSITIONS)), len(resolved))
+        ]
+        best = max(score for score, _, _ in seatings)
+        archetype_index, indices = random.choice(
+            [(ai, idx) for score, ai, idx in seatings if score == best]
+        )
+        archetype = ARCHETYPES[archetype_index]
+        for (hero, _), index in zip(resolved, indices):
+            heroes[index] = hero
+            locked.append(index)
 
     for index, (position, _, _) in enumerate(POSITIONS):
         if heroes[index] is not None:
@@ -284,4 +326,17 @@ def roll_draft(locked_hero: str | None = None) -> Draft:
         pool = [hero for hero in archetype["pools"][position] if hero not in heroes]
         heroes[index] = random.choice(pool)
 
-    return Draft(archetype["name"], archetype["plan"], heroes, locked_index, known)
+    return Draft(
+        archetype["name"],
+        archetype["plan"],
+        heroes,
+        sorted(locked),
+        [hero for hero, known in resolved if not known],
+    )
+
+
+def reroll_hero(archetype_name: str, index: int, taken: list[str]) -> str | None:
+    """Swap one position for a different hero from the same plan."""
+    archetype = next(a for a in ARCHETYPES if a["name"] == archetype_name)
+    pool = [hero for hero in archetype["pools"][index + 1] if hero not in taken]
+    return random.choice(pool) if pool else None
