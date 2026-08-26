@@ -25,6 +25,7 @@ from config import (  # noqa: E402
     CASINO_SLOTS,
     CASINO_SYMBOLS,
     DAY_RESET_UTC_OFFSET_HOURS,
+    DOTA_CUSTOM_PLAN_PRICE,
     DOTA_DRAFT_PRICE,
     DOTA_REROLL_PRICE,
     GIVE_COOLDOWN_SECONDS,
@@ -1334,7 +1335,7 @@ def ask_for_hero(giver: dict, chat_id, dm_chat_id, message_id=None) -> None:
     it just sits until they answer it, skip it, or it expires.
     """
     balance = get_kabankoins(chat_id, giver["id"])
-    if balance < DOTA_DRAFT_PRICE:
+    if balance < min(DOTA_DRAFT_PRICE, DOTA_CUSTOM_PLAN_PRICE):
         text = insufficient_balance_text(balance)
         if message_id is None:
             send_to_dm(giver, chat_id, text)
@@ -1344,16 +1345,24 @@ def ask_for_hero(giver: dict, chat_id, dm_chat_id, message_id=None) -> None:
         return
 
     text = (
-        f"🎲 Рейтинговый пик — {DOTA_DRAFT_PRICE} {KABANKOIN_EMOJI}\n\n"
-        "Напишите сообщением героя, которого хотите видеть в пике — остальных "
-        "подберу под него.\n"
-        f"Можно сразу нескольких через запятую (до {len(dota_draft.POSITIONS)}): "
-        "например «Invoker, Pudge».\n"
-        "Или нажмите «Без своего героя», и я соберу состав сам."
+        "🎲 Рейтинговый пик\n\n"
+        f"Напишите сообщением героя, которого хотите видеть в пике ({DOTA_DRAFT_PRICE} "
+        f"{KABANKOIN_EMOJI}) — остальных подберу под него. Можно сразу нескольких "
+        f"через запятую (до {len(dota_draft.POSITIONS)}): например «Invoker, Pudge».\n\n"
+        "Или соберу состав сам:\n"
+        f"• «Без своего героя» — случайный план, {DOTA_DRAFT_PRICE} {KABANKOIN_EMOJI}\n"
+        f"• «Свой план» — вы пишете стратегию, я подбираю под неё героев, "
+        f"{DOTA_CUSTOM_PLAN_PRICE} {KABANKOIN_EMOJI}"
     )
     keyboard = {
         "inline_keyboard": [
             [{"text": "Без своего героя", "callback_data": "bkskip"}],
+            [
+                {
+                    "text": f"✍️ Свой план — {DOTA_CUSTOM_PLAN_PRICE} {KABANKOIN_EMOJI}",
+                    "callback_data": "bkplan",
+                }
+            ],
             [CANCEL_BUTTON],
         ]
     }
@@ -1370,6 +1379,28 @@ def ask_for_hero(giver: dict, chat_id, dm_chat_id, message_id=None) -> None:
     storage.set_state(
         giver["id"],
         {"step": "bk_hero", "chat_id": str(chat_id), "message_id": message_id},
+    )
+
+
+def ask_for_plan(giver: dict, chat_id, dm_chat_id, message_id) -> None:
+    """Ask the player to write the strategy the draft should follow."""
+    tg.edit_message_text(
+        dm_chat_id,
+        message_id,
+        f"✍️ Свой план — {DOTA_CUSTOM_PLAN_PRICE} {KABANKOIN_EMOJI}\n\n"
+        "Отправьте сообщением: первая строка — название стратегии, дальше сам "
+        "план.\n\n"
+        "Например:\n"
+        "Быстрый пуш\n"
+        "Ломаем вышки на 20-й минуте, не даём фарм\n\n"
+        "Название и план покажу как есть. Героев подберу по смыслу написанного: "
+        "сопоставлю ваш план с ближайшим из своих и возьму состав оттуда — "
+        "читать текст целиком я не умею.",
+        reply_markup={"inline_keyboard": [[CANCEL_BUTTON]]},
+    )
+    storage.set_state(
+        giver["id"],
+        {"step": "bk_plan", "chat_id": str(chat_id), "message_id": message_id},
     )
 
 
@@ -1404,10 +1435,21 @@ def start_bk_flow(giver: dict, dm_chat_id, locked: str | None) -> None:
     )
 
 
-def begin_draft(giver: dict, chat_id, dm_chat_id, message_id=None, locked: str | None = None) -> None:
+def begin_draft(
+    giver: dict,
+    chat_id,
+    dm_chat_id,
+    message_id=None,
+    locked: str | None = None,
+    plan_name: str | None = None,
+    plan_text: str | None = None,
+) -> None:
     """Charge for a draft, roll it whole, and open the reveal board in the DM."""
+    written = bool(plan_name or plan_text)
+    price = DOTA_CUSTOM_PLAN_PRICE if written else DOTA_DRAFT_PRICE
+
     spent, balance = storage.spend_kabankoins(
-        chat_id, giver["id"], current_day_key(), DOTA_DRAFT_PRICE, KABANKOIN_DAILY_AMOUNT
+        chat_id, giver["id"], current_day_key(), price, KABANKOIN_DAILY_AMOUNT
     )
     if not spent:
         text = insufficient_balance_text(balance)
@@ -1420,11 +1462,16 @@ def begin_draft(giver: dict, chat_id, dm_chat_id, message_id=None, locked: str |
 
     # Rolled in full before the first reveal, so the line-up cannot drift
     # between button presses.
-    draft = dota_draft.roll_draft(locked)
+    draft = dota_draft.roll_draft(locked, plan_name, plan_text)
     text = draft_text(draft.archetype, draft.heroes, 0, draft.locked)
     if draft.unknown:
         names = ", ".join(draft.unknown)
         text += f"\n\nНе знаю таких героев: {names} — роли им выбрал наугад."
+    if written and not draft.matched:
+        text += (
+            "\n\nВ вашем плане я не узнал ни одной знакомой идеи, так что состав "
+            "взял наугад."
+        )
     # Naming all five leaves nothing to turn over; that draft is already done.
     pending = reveal_order(draft.locked)
     keyboard = draft_keyboard(0, draft.locked) if pending else None
@@ -1434,7 +1481,7 @@ def begin_draft(giver: dict, chat_id, dm_chat_id, message_id=None, locked: str |
         if sent is None:
             # The DM never arrived — nothing was delivered, so nothing is owed.
             storage.add_kabankoins(
-                chat_id, giver["id"], current_day_key(), DOTA_DRAFT_PRICE, KABANKOIN_DAILY_AMOUNT
+                chat_id, giver["id"], current_day_key(), price, KABANKOIN_DAILY_AMOUNT
             )
             storage.clear_state(giver["id"])
             return
@@ -1447,6 +1494,10 @@ def begin_draft(giver: dict, chat_id, dm_chat_id, message_id=None, locked: str |
         "chat_id": str(chat_id),
         "archetype": draft.archetype,
         "plan": draft.plan,
+        # The plan the pools came from — a written plan carries the player's
+        # own title, which no pool is filed under.
+        "pool_name": draft.pool_name,
+        "written": written,
         "heroes": draft.heroes,
         "locked": draft.locked,
         "rerolled": [],
@@ -1469,8 +1520,10 @@ def announcement_text(giver_name: str, state: dict) -> str:
     roster = draft_roster(
         heroes, set(range(len(heroes))), locked, state.get("rerolled"), own="выбор игрока"
     )
+    own_plan = " по своему плану" if state.get("written") else ""
     return (
-        f"🎲 {giver_name} выкупает рейтинговый пик{around} — «{state['archetype']}»\n\n"
+        f"🎲 {giver_name} выкупает рейтинговый пик{around}{own_plan} — "
+        f"«{state['archetype']}»\n\n"
         f"{roster}\n\n"
         f"План: {state['plan']}\n"
         f"Баланс: {state['balance']} {KABANKOIN_EMOJI}"
@@ -1531,7 +1584,9 @@ def reroll_pick(giver: dict, state: dict, dm_chat_id, message_id, index: int) ->
         return
 
     chat_id = state["chat_id"]
-    replacement = dota_draft.reroll_hero(state["archetype"], index, state["heroes"])
+    replacement = dota_draft.reroll_hero(
+        state.get("pool_name") or state["archetype"], index, state["heroes"]
+    )
     if replacement is None:
         # The plan's pool for this position is exhausted by the current draft.
         label = dota_draft.POSITIONS[index][1].lower()
@@ -1884,6 +1939,8 @@ def handle_start(message: dict, args: str) -> None:
         "Перед прокруткой бот спросит, хотите ли вы закрепить своих героев: "
         "напишите их сообщением через запятую — они займут свои позиции сразу, "
         "а остальных подберу под них. Не хотите — нажмите «Без своего героя».\n"
+        f"Можно наоборот: «Свой план» ({DOTA_CUSTOM_PLAN_PRICE} {KABANKOIN_EMOJI}) — "
+        "вы пишете название и стратегию, а героев подбираю я.\n"
         "Когда пик собран, любого из выбранных ботом можно заменить на другого "
         f"из того же плана за {DOTA_REROLL_PRICE} {KABANKOIN_EMOJI}.\n\n"
         f"{LIST_COMMAND} — список карточек участников чата.",
@@ -1946,7 +2003,7 @@ def _handle_callback(callback: dict) -> None:
         (
             "gu:", "sl:", "cchat:", "ctype:", "cuser:", "cbet:",
             "paychat:", "payuser:", "tagchat:", "taguser:", "tagtier:",
-            "bkchat:", "bknext", "bkskip", "bkre:",
+            "bkchat:", "bknext", "bkskip", "bkre:", "bkplan",
         )
     ) or (data == "cancel" and message["chat"].get("type") in GROUP_TYPES)
     if needs_state and not state:
@@ -1956,7 +2013,7 @@ def _handle_callback(callback: dict) -> None:
             text = "Это не ваш перевод."
         elif data.startswith(("tagchat:", "taguser:", "tagtier:")):
             text = "Это не ваш тег."
-        elif data.startswith(("bkchat:", "bknext", "bkskip", "bkre:")):
+        elif data.startswith(("bkchat:", "bknext", "bkskip", "bkre:", "bkplan")):
             text = "Это не ваш пик."
         else:
             text = "Это не ваша карточка."
@@ -2136,6 +2193,13 @@ def _handle_callback(callback: dict) -> None:
         begin_draft(user, state["chat_id"], dm_chat_id, message_id)
         return
 
+    if data == "bkplan":
+        if state.get("step") != "bk_hero" or state.get("message_id") != message_id:
+            tg.edit_message_text(dm_chat_id, message_id, f"Устарело, начните заново: {BK_COMMAND}")
+            return
+        ask_for_plan(user, state["chat_id"], dm_chat_id, message_id)
+        return
+
     if data.startswith("bkre:"):
         if state.get("step") != "bk_done" or state.get("message_id") != message_id:
             tg.edit_message_text(dm_chat_id, message_id, f"Устарело, начните заново: {BK_COMMAND}")
@@ -2196,6 +2260,24 @@ def _handle_private_text(message: dict) -> None:
             message["chat"]["id"],
             state["message_id"],
             locked=dota_draft.parse_heroes(message["text"]),
+        )
+        return
+
+    if step == "bk_plan":
+        # First line names the strategy, whatever follows is the plan itself.
+        name, _, plan = message["text"].strip().partition("\n")
+        name = " ".join(name.split())[:64]
+        plan = " ".join(plan.split())[:400]
+        if not name:
+            tg.send_message(message["chat"]["id"], "Пустой план. Напишите название и план.")
+            return
+        begin_draft(
+            user,
+            state["chat_id"],
+            message["chat"]["id"],
+            state["message_id"],
+            plan_name=name,
+            plan_text=plan or name,
         )
         return
 

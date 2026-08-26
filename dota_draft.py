@@ -28,6 +28,8 @@ POSITIONS = [
 ARCHETYPES = [
     {
         "name": "Вомбо-комбо",
+        # Matched against a plan written by the player.
+        "keywords": ["замес", "тимфайт", "файт", "ульт", "площад", "кучу", "куч", "инициац", "комбо", "вомбо", "разлож", "оглуш", "стан", "магическ"],
         "plan": (
             "Собрать врага в кучу и разложить одним замесом. Инициатор ловит "
             "пачку, площадные ульты добивают, керри заходит следом под уже "
@@ -43,6 +45,8 @@ ARCHETYPES = [
     },
     {
         "name": "Осада",
+        # Matched against a plan written by the player.
+        "keywords": ["вышк", "пуш", "осад", "здани", "трон", "крип", "саммон", "тавер", "ломаем", "сносим", "хайграунд", "башн", "строени"],
         "plan": (
             "Снести вышки раньше, чем враг соберёт свои предметы. Постоянное "
             "давление по линиям, крипы и саммоны идут вперёд, команда заходит "
@@ -58,6 +62,8 @@ ARCHETYPES = [
     },
     {
         "name": "Пикофф",
+        # Matched against a plan written by the player.
+        "keywords": ["пикоф", "ганг", "ловим", "по одному", "роум", "убива", "инвиз", "засад", "охот", "размен", "рошан", "поодиночке"],
         "plan": (
             "Не давать врагу собраться впятером. Ловим по одному на линиях и "
             "в лесу, размениваем карту, забираем Рошана на численном "
@@ -73,6 +79,8 @@ ARCHETYPES = [
     },
     {
         "name": "Долгая игра",
+        # Matched against a plan written by the player.
+        "keywords": ["лейт", "фарм", "долг", "поздн", "тянем", "скейл", "выжив", "пережи", "защища", "затян"],
         "plan": (
             "Пережить ранний прессинг и задавить в лейте. Оффлейнер и "
             "саппорты тянут время и выкупают керри из любой беды, всё "
@@ -88,6 +96,8 @@ ARCHETYPES = [
     },
     {
         "name": "Ранний прессинг",
+        # Matched against a plan written by the player.
+        "keywords": ["ранн", "агресс", "прессинг", "темп", "давим", "снежн", "наглы", "первой минут", "быстр", "начал"],
         "plan": (
             "Давить с первой минуты и не дать врагу выйти на свои тайминги. "
             "Агрессивные линии, ранние ганги, темп важнее фарма — если игра "
@@ -312,6 +322,30 @@ class Draft(NamedTuple):
     locked: list[int]
     # Names we did not recognise — their roles were a guess.
     unknown: list[str]
+    # The plan whose pools the heroes came from. Differs from `archetype` when
+    # the player wrote their own, and is what reroll_hero looks up.
+    pool_name: str = ""
+    # With a written plan: whether any keyword actually matched.
+    matched: bool = True
+
+
+def match_plan(text: str) -> tuple[int, bool]:
+    """Find the known plan closest to one a player wrote.
+
+    Keyword counting, not comprehension: there is no model behind the bot, so
+    prose can only be mapped onto the nearest plan it already knows how to
+    draft for. Returns (archetype index, whether anything matched) so the
+    caller can be honest when it is a guess.
+    """
+    haystack = re.sub(r"[^a-zа-яё0-9 ]+", " ", (text or "").lower())
+    scores = [
+        sum(1 for word in archetype["keywords"] if word in haystack)
+        for archetype in ARCHETYPES
+    ]
+    best = max(scores)
+    if not best:
+        return random.randrange(len(ARCHETYPES)), False
+    return random.choice([i for i, score in enumerate(scores) if score == best]), True
 
 
 def _norm(name: str) -> str:
@@ -379,7 +413,11 @@ def _fit(archetype: dict, hero: str, known: bool, index: int) -> int:
     return 0  # forced
 
 
-def roll_draft(locked_heroes: list[str] | str | None = None) -> Draft:
+def roll_draft(
+    locked_heroes: list[str] | str | None = None,
+    plan_name: str | None = None,
+    plan_text: str | None = None,
+) -> Draft:
     """Roll a full line-up, optionally built around heroes the player named.
 
     The whole draft is rolled at once, before the first reveal, so the line-up
@@ -390,6 +428,9 @@ def roll_draft(locked_heroes: list[str] | str | None = None) -> Draft:
     actually plays, no two on the same one — and the best-fitting plan wins.
     Their team-mates are then drawn from that plan, so the rest of the draft is
     picked to go with them rather than merely around them.
+
+    A plan written by the player replaces the displayed name and text, and its
+    wording picks which known plan the heroes are drafted from.
     """
     if isinstance(locked_heroes, str):
         locked_heroes = [locked_heroes]
@@ -404,12 +445,20 @@ def roll_draft(locked_heroes: list[str] | str | None = None) -> Draft:
     heroes: list[str | None] = [None] * len(POSITIONS)
     locked: list[int] = []
 
+    written = bool(plan_name or plan_text)
+    matched = True
+    if written:
+        chosen_index, matched = match_plan(f"{plan_name or ''} {plan_text or ''}")
+        candidates = [chosen_index]
+    else:
+        candidates = list(range(len(ARCHETYPES)))
+
     if not resolved:
-        archetype = random.choice(ARCHETYPES)
+        archetype = ARCHETYPES[random.choice(candidates)]
     else:
         seatings = [
             (archetype_index, indices)
-            for archetype_index in range(len(ARCHETYPES))
+            for archetype_index in candidates
             for indices in itertools.permutations(range(len(POSITIONS)), len(resolved))
         ]
         fits = [
@@ -449,16 +498,20 @@ def roll_draft(locked_heroes: list[str] | str | None = None) -> Draft:
         heroes[index] = random.choice(pool)
 
     return Draft(
-        archetype["name"],
-        archetype["plan"],
+        (plan_name or archetype["name"]).strip() if written else archetype["name"],
+        (plan_text or "").strip() if written else archetype["plan"],
         heroes,
         sorted(locked),
         [hero for hero, known in resolved if not known],
+        archetype["name"],
+        matched,
     )
 
 
-def reroll_hero(archetype_name: str, index: int, taken: list[str]) -> str | None:
+def reroll_hero(pool_name: str, index: int, taken: list[str]) -> str | None:
     """Swap one position for a different hero from the same plan."""
-    archetype = next(a for a in ARCHETYPES if a["name"] == archetype_name)
+    archetype = next((a for a in ARCHETYPES if a["name"] == pool_name), None)
+    if archetype is None:
+        return None
     pool = [hero for hero in archetype["pools"][index + 1] if hero not in taken]
     return random.choice(pool) if pool else None

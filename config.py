@@ -84,6 +84,10 @@ DOTA_DRAFT_PRICE = 50
 # bot's own picks can be rerolled — the player's own choices stay put.
 DOTA_REROLL_PRICE = 10
 
+# Writing the plan yourself and letting the bot fill in the heroes. Cheaper
+# than a rolled draft because the player supplies the idea.
+DOTA_CUSTOM_PLAN_PRICE = 25
+
 # Casino bets no longer get refused for lack of funds — they can go into debt
 # instead, down to KABANKOIN_DEBT_BAN_LEVEL. Crossing each level below
 # punishes the spinner in the group chat; once debt reaches the ban level,
