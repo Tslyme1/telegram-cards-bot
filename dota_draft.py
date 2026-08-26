@@ -10,6 +10,8 @@ that actually want to be on the same team.
 """
 
 import random
+import re
+from typing import NamedTuple
 
 # (position, label, emoji) — exactly one hero each, so a five-carry draft is
 # impossible by construction.
@@ -100,20 +102,186 @@ ARCHETYPES = [
 ]
 
 
-def roll_draft() -> tuple[str, str, list[str]]:
-    """Roll one archetype and a hero for each position within it.
+# Heroes outside the archetype pools, so that locking in any real hero still
+# lands on a sane position. Values are the positions each one commonly plays.
+EXTRA_HEROES = {
+    "Alchemist": [1, 3],
+    "Ancient Apparition": [5],
+    "Arc Warden": [1, 2],
+    "Bounty Hunter": [4],
+    "Brewmaster": [3],
+    "Broodmother": [2, 3],
+    "Chaos Knight": [1],
+    "Clinkz": [1, 2],
+    "Dawnbreaker": [3, 4],
+    "Doom": [3],
+    "Elder Titan": [3, 4],
+    "Huskar": [1, 2, 3],
+    "Io": [4, 5],
+    "Kez": [1, 2],
+    "Lone Druid": [1, 3],
+    "Meepo": [1, 2],
+    "Mirana": [1, 4],
+    "Morphling": [1, 2],
+    "Muerta": [1, 2],
+    "Necrophos": [2, 3],
+    "Phantom Lancer": [1],
+    "Primal Beast": [3],
+    "Pugna": [2, 4, 5],
+    "Riki": [1, 4],
+    "Ringmaster": [4, 5],
+    "Rubick": [5],
+    "Sand King": [3, 4],
+    "Shadow Fiend": [2],
+    "Silencer": [4, 5],
+    "Skywrath Mage": [5],
+    "Sniper": [1, 2],
+    "Techies": [4, 5],
+    "Treant Protector": [5],
+    "Troll Warlord": [1],
+    "Weaver": [1, 4],
+    "Windranger": [2, 4],
+    "Witch Doctor": [4, 5],
+    "Wraith King": [1, 3],
+}
 
-    Returns (archetype_name, plan, heroes) with heroes ordered by position.
-    The whole draft is rolled at once, before the first reveal, so the
-    line-up cannot drift between button presses.
+# What people actually type instead of the full name.
+ALIASES = {
+    "pa": "Phantom Assassin",
+    "am": "Anti-Mage",
+    "qop": "Queen of Pain",
+    "sf": "Shadow Fiend",
+    "ta": "Templar Assassin",
+    "cm": "Crystal Maiden",
+    "wk": "Wraith King",
+    "wd": "Witch Doctor",
+    "ww": "Winter Wyvern",
+    "es": "Earthshaker",
+    "sb": "Spirit Breaker",
+    "np": "Nature's Prophet",
+    "od": "Outworld Destroyer",
+    "lc": "Legion Commander",
+    "dp": "Death Prophet",
+    "dk": "Dragon Knight",
+    "tb": "Terrorblade",
+    "sk": "Sand King",
+    "void": "Faceless Void",
+    "magnus": "Magnus",
+    "aa": "Ancient Apparition",
+    "bh": "Bounty Hunter",
+    "ns": "Night Stalker",
+    "pl": "Phantom Lancer",
+    "ck": "Chaos Knight",
+    "mk": "Monkey King",
+    "sd": "Shadow Demon",
+    "ss": "Shadow Shaman",
+    "kotl": "Keeper of the Light",
+    "veno": "Venomancer",
+    "invo": "Invoker",
+    "пудж": "Pudge",
+    "свен": "Sven",
+    "инвокер": "Invoker",
+    "зевс": "Zeus",
+    "лина": "Lina",
+    "лион": "Lion",
+    "слардар": "Slardar",
+    "урса": "Ursa",
+    "тини": "Tiny",
+    "медуза": "Medusa",
+    "спектра": "Spectre",
+    "аксе": "Axe",
+    "акс": "Axe",
+    "джаг": "Juggernaut",
+    "джагернаут": "Juggernaut",
+}
+
+POOL_HEROES = {hero for a in ARCHETYPES for pool in a["pools"].values() for hero in pool}
+ALL_HEROES = POOL_HEROES | set(EXTRA_HEROES)
+
+
+class Draft(NamedTuple):
+    archetype: str
+    plan: str
+    heroes: list[str]
+    # Index into POSITIONS of the hero the player asked for, or None.
+    locked_index: int | None
+    # False when the locked hero is not one we know — the role was then a guess.
+    known: bool
+
+
+def _norm(name: str) -> str:
+    """Fold a typed name so spelling and punctuation stop mattering."""
+    return re.sub(r"[^a-zа-яё0-9]", "", name.lower())
+
+
+_BY_NORM = {_norm(hero): hero for hero in ALL_HEROES}
+_BY_ALIAS = {_norm(alias): hero for alias, hero in ALIASES.items()}
+
+
+def resolve_hero(name: str) -> tuple[str, bool]:
+    """Match typed text to a known hero. Returns (name_to_use, recognised)."""
+    key = _norm(name)
+    hero = _BY_NORM.get(key) or _BY_ALIAS.get(key)
+    if hero:
+        return hero, True
+
+    # A unique prefix is enough — "terror" and "shadow sh" resolve fine.
+    matches = {full for norm, full in _BY_NORM.items() if key and norm.startswith(key)}
+    if len(matches) == 1:
+        return matches.pop(), True
+
+    # Anything else is taken at face value: the hero is the player's to choose.
+    return " ".join(name.split())[:32], False
+
+
+def _placements(hero: str, known: bool) -> list[tuple[int, int]]:
+    """Every (archetype, position index) the hero could legitimately fill."""
+    spots = [
+        (index, position - 1)
+        for index, archetype in enumerate(ARCHETYPES)
+        for position, pool in archetype["pools"].items()
+        if hero in pool
+    ]
+    if spots:
+        return spots
+
+    positions = EXTRA_HEROES.get(hero) if known else None
+    if not positions:
+        # Nothing to go on, so any slot is as good as another.
+        positions = [position for position, _, _ in POSITIONS]
+    return [
+        (index, position - 1)
+        for index in range(len(ARCHETYPES))
+        for position in positions
+    ]
+
+
+def roll_draft(locked_hero: str | None = None) -> Draft:
+    """Roll a full line-up, optionally built around a hero the player named.
+
+    The whole draft is rolled at once, before the first reveal, so the line-up
+    cannot drift between button presses. A locked hero fixes both the position
+    it occupies and the plan the rest of the team is drawn from, so the other
+    four are picked to go with it rather than around it.
     """
-    archetype = random.choice(ARCHETYPES)
+    heroes: list[str | None] = [None] * len(POSITIONS)
+    locked_index = None
+    known = True
 
-    heroes: list[str] = []
-    for position, _, _ in POSITIONS:
+    if locked_hero:
+        hero, known = resolve_hero(locked_hero)
+        archetype_index, locked_index = random.choice(_placements(hero, known))
+        archetype = ARCHETYPES[archetype_index]
+        heroes[locked_index] = hero
+    else:
+        archetype = random.choice(ARCHETYPES)
+
+    for index, (position, _, _) in enumerate(POSITIONS):
+        if heroes[index] is not None:
+            continue
         # A few heroes sit in two pools of the same archetype (Dragon Knight
         # plays mid and offlane, say) — never draft the same one twice.
         pool = [hero for hero in archetype["pools"][position] if hero not in heroes]
-        heroes.append(random.choice(pool))
+        heroes[index] = random.choice(pool)
 
-    return archetype["name"], archetype["plan"], heroes
+    return Draft(archetype["name"], archetype["plan"], heroes, locked_index, known)

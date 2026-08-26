@@ -1263,24 +1263,37 @@ def finish_tag(
 # --- /bk: a rolled Dota line-up, revealed one hero at a time ----------------
 
 
-def draft_text(archetype: str, heroes: list[str], revealed: int) -> str:
-    """The draft board with `revealed` positions filled in and the rest hidden."""
-    lines = [f"🎲 Рейтинговый пик — «{archetype}»", ""]
+def reveal_order(locked_index) -> list[int]:
+    """Positions the button walks through — the player's own hero is not one."""
+    return [i for i in range(len(dota_draft.POSITIONS)) if i != locked_index]
+
+
+def draft_roster(heroes: list[str], shown: set[int], locked_index) -> str:
+    lines = []
     for index, (position, label, emoji) in enumerate(dota_draft.POSITIONS):
-        hero = heroes[index] if index < revealed else "▫️ ???"
-        lines.append(f"{emoji} {label} ({position}): {hero}")
-    lines.append("")
-    lines.append(
-        f"Открыто {revealed} из {len(dota_draft.POSITIONS)}."
-        if revealed < len(dota_draft.POSITIONS)
-        else "Пик собран."
-    )
+        hero = heroes[index] if index in shown else "▫️ ???"
+        mark = " ← ваш выбор" if index == locked_index else ""
+        lines.append(f"{emoji} {label} ({position}): {hero}{mark}")
     return "\n".join(lines)
 
 
-def draft_keyboard(revealed: int) -> dict:
-    left = len(dota_draft.POSITIONS) - revealed
-    _, label, emoji = dota_draft.POSITIONS[revealed]
+def draft_text(archetype: str, heroes: list[str], revealed: int, locked_index) -> str:
+    """The draft board with `revealed` picks turned over and the rest hidden."""
+    order = reveal_order(locked_index)
+    shown = set(order[:revealed]) | ({locked_index} if locked_index is not None else set())
+
+    left = len(order) - revealed
+    footer = f"Осталось открыть: {left}." if left else "Пик собран."
+    return (
+        f"🎲 Рейтинговый пик — «{archetype}»\n\n"
+        f"{draft_roster(heroes, shown, locked_index)}\n\n{footer}"
+    )
+
+
+def draft_keyboard(revealed: int, locked_index) -> dict:
+    order = reveal_order(locked_index)
+    left = len(order) - revealed
+    _, label, emoji = dota_draft.POSITIONS[order[revealed]]
     return {
         "inline_keyboard": [
             [{"text": f"{emoji} Открыть {label.lower()} (осталось {left})", "callback_data": "bknext"}]
@@ -1288,7 +1301,7 @@ def draft_keyboard(revealed: int) -> dict:
     }
 
 
-def start_bk_flow(giver: dict, dm_chat_id) -> None:
+def start_bk_flow(giver: dict, dm_chat_id, locked: str | None) -> None:
     """Entry point for /bk from the bot's DM: pick a chat first if there are several."""
     chats = storage.list_user_chats(giver["id"])
     if not chats:
@@ -1300,7 +1313,7 @@ def start_bk_flow(giver: dict, dm_chat_id) -> None:
         return
 
     if len(chats) == 1:
-        begin_draft(giver, chats[0][0], dm_chat_id)
+        begin_draft(giver, chats[0][0], dm_chat_id, locked=locked)
         return
 
     keyboard = [[{"text": title, "callback_data": f"bkchat:{cid}"}] for cid, title in chats]
@@ -1310,10 +1323,13 @@ def start_bk_flow(giver: dict, dm_chat_id) -> None:
         f"За чей баланс крутим пик ({DOTA_DRAFT_PRICE} {KABANKOIN_EMOJI})?",
         reply_markup={"inline_keyboard": keyboard},
     )
-    storage.set_state(giver["id"], {"step": "bk_chat", "message_id": sent.get("message_id")})
+    storage.set_state(
+        giver["id"],
+        {"step": "bk_chat", "locked": locked, "message_id": sent.get("message_id")},
+    )
 
 
-def begin_draft(giver: dict, chat_id, dm_chat_id, message_id=None) -> None:
+def begin_draft(giver: dict, chat_id, dm_chat_id, message_id=None, locked: str | None = None) -> None:
     """Charge for a draft, roll it whole, and open the reveal board in the DM."""
     spent, balance = storage.spend_kabankoins(
         chat_id, giver["id"], current_day_key(), DOTA_DRAFT_PRICE, KABANKOIN_DAILY_AMOUNT
@@ -1329,9 +1345,11 @@ def begin_draft(giver: dict, chat_id, dm_chat_id, message_id=None) -> None:
 
     # Rolled in full before the first reveal, so the line-up cannot drift
     # between button presses.
-    archetype, plan, heroes = dota_draft.roll_draft()
-    text = draft_text(archetype, heroes, 0)
-    keyboard = draft_keyboard(0)
+    draft = dota_draft.roll_draft(locked)
+    text = draft_text(draft.archetype, draft.heroes, 0, draft.locked_index)
+    if draft.locked_index is not None and not draft.known:
+        text += "\n\nТакого героя я не знаю — роль ему выбрал наугад."
+    keyboard = draft_keyboard(0, draft.locked_index)
 
     if message_id is None:
         sent = send_to_dm(giver, chat_id, text, keyboard)
@@ -1351,9 +1369,10 @@ def begin_draft(giver: dict, chat_id, dm_chat_id, message_id=None) -> None:
         {
             "step": "bk_reveal",
             "chat_id": str(chat_id),
-            "archetype": archetype,
-            "plan": plan,
-            "heroes": heroes,
+            "archetype": draft.archetype,
+            "plan": draft.plan,
+            "heroes": draft.heroes,
+            "locked_index": draft.locked_index,
             "revealed": 0,
             "balance": balance,
             "message_id": message_id,
@@ -1363,8 +1382,9 @@ def begin_draft(giver: dict, chat_id, dm_chat_id, message_id=None) -> None:
 
 def reveal_next_hero(giver: dict, state: dict, dm_chat_id, message_id) -> None:
     revealed = state["revealed"] + 1
-    total = len(dota_draft.POSITIONS)
     archetype, heroes = state["archetype"], state["heroes"]
+    locked_index = state.get("locked_index")
+    total = len(reveal_order(locked_index))
 
     if revealed < total:
         state["revealed"] = revealed
@@ -1372,22 +1392,24 @@ def reveal_next_hero(giver: dict, state: dict, dm_chat_id, message_id) -> None:
         tg.edit_message_text(
             dm_chat_id,
             message_id,
-            draft_text(archetype, heroes, revealed),
-            reply_markup=draft_keyboard(revealed),
+            draft_text(archetype, heroes, revealed, locked_index),
+            reply_markup=draft_keyboard(revealed, locked_index),
         )
         return
 
     storage.clear_state(giver["id"])
-    tg.edit_message_text(dm_chat_id, message_id, draft_text(archetype, heroes, total))
-
-    chat_id = state["chat_id"]
-    roster = "\n".join(
-        f"{emoji} {label} ({position}): {hero}"
-        for (position, label, emoji), hero in zip(dota_draft.POSITIONS, heroes)
+    tg.edit_message_text(
+        dm_chat_id, message_id, draft_text(archetype, heroes, total, locked_index)
     )
+
+    roster = draft_roster(heroes, set(range(len(heroes))), locked_index)
+    around = ""
+    if locked_index is not None:
+        around = f" вокруг {heroes[locked_index]}"
+
     tg.send_message(
-        chat_id,
-        f"🎲 {display_name(giver)} выкупает рейтинговый пик — «{archetype}»\n\n"
+        state["chat_id"],
+        f"🎲 {display_name(giver)} выкупает рейтинговый пик{around} — «{archetype}»\n\n"
         f"{roster}\n\n"
         f"План: {state['plan']}\n"
         f"Баланс: {state['balance']} {KABANKOIN_EMOJI}",
@@ -1566,12 +1588,13 @@ def handle_tag(message: dict, args: str) -> None:
 def handle_bk(message: dict, args: str) -> None:
     chat = message["chat"]
     giver = message["from"]
+    locked = args.strip() or None
 
     if chat.get("type") not in GROUP_TYPES:
-        start_bk_flow(giver, chat["id"])
+        start_bk_flow(giver, chat["id"], locked)
         return
 
-    begin_draft(giver, chat["id"], chat["id"])
+    begin_draft(giver, chat["id"], chat["id"], locked=locked)
 
 
 def handle_reset_coins(message: dict, args: str) -> None:
@@ -1692,7 +1715,10 @@ def handle_start(message: dict, args: str) -> None:
         f"{BK_COMMAND} — рейтинговый пик Dota за {DOTA_DRAFT_PRICE} {KABANKOIN_EMOJI}: "
         f"бот в личке открывает состав по одному герою, {len(dota_draft.POSITIONS)} "
         "нажатия. Роли всегда 1-2-3-4-5 по разу, а герои берутся из одного "
-        "плана на игру, так что состав получается осмысленным.\n\n"
+        "плана на игру, так что состав получается осмысленным.\n"
+        f"{BK_COMMAND} <герой> — закрепить своего героя: он занимает свою "
+        "позицию сразу, а остальные четверо подбираются уже под него "
+        f"(например, «{BK_COMMAND} Invoker»).\n\n"
         f"{LIST_COMMAND} — список карточек участников чата.",
     )
 
@@ -1929,7 +1955,9 @@ def _handle_callback(callback: dict) -> None:
         if state.get("step") != "bk_chat" or state.get("message_id") != message_id:
             tg.edit_message_text(dm_chat_id, message_id, f"Устарело, начните заново: {BK_COMMAND}")
             return
-        begin_draft(user, data.split(":", 1)[1], dm_chat_id, message_id)
+        begin_draft(
+            user, data.split(":", 1)[1], dm_chat_id, message_id, locked=state.get("locked")
+        )
         return
 
     if data == "bknext":
