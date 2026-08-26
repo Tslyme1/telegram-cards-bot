@@ -1301,6 +1301,50 @@ def draft_keyboard(revealed: int, locked_index) -> dict:
     }
 
 
+def ask_for_hero(giver: dict, chat_id, dm_chat_id, message_id=None) -> None:
+    """Offer to lock a hero in before the draft is rolled — and paid for.
+
+    Nothing is charged here: an unanswered question costs the player nothing,
+    it just sits until they answer it, skip it, or it expires.
+    """
+    balance = get_kabankoins(chat_id, giver["id"])
+    if balance < DOTA_DRAFT_PRICE:
+        text = insufficient_balance_text(balance)
+        if message_id is None:
+            send_to_dm(giver, chat_id, text)
+        else:
+            tg.edit_message_text(dm_chat_id, message_id, text)
+        storage.clear_state(giver["id"])
+        return
+
+    text = (
+        f"🎲 Рейтинговый пик — {DOTA_DRAFT_PRICE} {KABANKOIN_EMOJI}\n\n"
+        "Напишите сообщением героя, которого хотите видеть в пике — остальных "
+        "подберу под него.\n"
+        "Или нажмите «Без своего героя», и я соберу состав сам."
+    )
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "Без своего героя", "callback_data": "bkskip"}],
+            [CANCEL_BUTTON],
+        ]
+    }
+
+    if message_id is None:
+        sent = send_to_dm(giver, chat_id, text, keyboard)
+        if sent is None:
+            storage.clear_state(giver["id"])
+            return
+        message_id = sent.get("message_id")
+    else:
+        tg.edit_message_text(dm_chat_id, message_id, text, reply_markup=keyboard)
+
+    storage.set_state(
+        giver["id"],
+        {"step": "bk_hero", "chat_id": str(chat_id), "message_id": message_id},
+    )
+
+
 def start_bk_flow(giver: dict, dm_chat_id, locked: str | None) -> None:
     """Entry point for /bk from the bot's DM: pick a chat first if there are several."""
     chats = storage.list_user_chats(giver["id"])
@@ -1313,7 +1357,10 @@ def start_bk_flow(giver: dict, dm_chat_id, locked: str | None) -> None:
         return
 
     if len(chats) == 1:
-        begin_draft(giver, chats[0][0], dm_chat_id, locked=locked)
+        if locked:
+            begin_draft(giver, chats[0][0], dm_chat_id, locked=locked)
+        else:
+            ask_for_hero(giver, chats[0][0], dm_chat_id)
         return
 
     keyboard = [[{"text": title, "callback_data": f"bkchat:{cid}"}] for cid, title in chats]
@@ -1588,13 +1635,18 @@ def handle_tag(message: dict, args: str) -> None:
 def handle_bk(message: dict, args: str) -> None:
     chat = message["chat"]
     giver = message["from"]
+    # Naming the hero right in the command still works, but the normal path is
+    # to be asked for it — see ask_for_hero.
     locked = args.strip() or None
 
     if chat.get("type") not in GROUP_TYPES:
         start_bk_flow(giver, chat["id"], locked)
         return
 
-    begin_draft(giver, chat["id"], chat["id"], locked=locked)
+    if locked:
+        begin_draft(giver, chat["id"], chat["id"], locked=locked)
+    else:
+        ask_for_hero(giver, chat["id"], chat["id"])
 
 
 def handle_reset_coins(message: dict, args: str) -> None:
@@ -1716,9 +1768,9 @@ def handle_start(message: dict, args: str) -> None:
         f"бот в личке открывает состав по одному герою, {len(dota_draft.POSITIONS)} "
         "нажатия. Роли всегда 1-2-3-4-5 по разу, а герои берутся из одного "
         "плана на игру, так что состав получается осмысленным.\n"
-        f"{BK_COMMAND} <герой> — закрепить своего героя: он занимает свою "
-        "позицию сразу, а остальные четверо подбираются уже под него "
-        f"(например, «{BK_COMMAND} Invoker»).\n\n"
+        "Перед прокруткой бот спросит, хотите ли вы закрепить своего героя: "
+        "напишите его сообщением — он займёт свою позицию сразу, а остальных "
+        "подберу под него. Не хотите — нажмите «Без своего героя».\n\n"
         f"{LIST_COMMAND} — список карточек участников чата.",
     )
 
@@ -1779,7 +1831,7 @@ def _handle_callback(callback: dict) -> None:
         (
             "gu:", "sl:", "cchat:", "ctype:", "cuser:", "cbet:",
             "paychat:", "payuser:", "tagchat:", "taguser:", "tagtier:",
-            "bkchat:", "bknext",
+            "bkchat:", "bknext", "bkskip",
         )
     ) or (data == "cancel" and message["chat"].get("type") in GROUP_TYPES)
     if needs_state and not state:
@@ -1789,7 +1841,7 @@ def _handle_callback(callback: dict) -> None:
             text = "Это не ваш перевод."
         elif data.startswith(("tagchat:", "taguser:", "tagtier:")):
             text = "Это не ваш тег."
-        elif data.startswith(("bkchat:", "bknext")):
+        elif data.startswith(("bkchat:", "bknext", "bkskip")):
             text = "Это не ваш пик."
         else:
             text = "Это не ваша карточка."
@@ -1955,9 +2007,18 @@ def _handle_callback(callback: dict) -> None:
         if state.get("step") != "bk_chat" or state.get("message_id") != message_id:
             tg.edit_message_text(dm_chat_id, message_id, f"Устарело, начните заново: {BK_COMMAND}")
             return
-        begin_draft(
-            user, data.split(":", 1)[1], dm_chat_id, message_id, locked=state.get("locked")
-        )
+        chat_id = data.split(":", 1)[1]
+        if state.get("locked"):
+            begin_draft(user, chat_id, dm_chat_id, message_id, locked=state["locked"])
+        else:
+            ask_for_hero(user, chat_id, dm_chat_id, message_id)
+        return
+
+    if data == "bkskip":
+        if state.get("step") != "bk_hero" or state.get("message_id") != message_id:
+            tg.edit_message_text(dm_chat_id, message_id, f"Устарело, начните заново: {BK_COMMAND}")
+            return
+        begin_draft(user, state["chat_id"], dm_chat_id, message_id)
         return
 
     if data == "bknext":
@@ -2004,6 +2065,16 @@ def _handle_private_text(message: dict) -> None:
             tg.send_message(message["chat"]["id"], "Нужно целое положительное число. Отправьте сумму ещё раз.")
             return
         finish_pay(user, message["chat"]["id"], state["chat_id"], state["target_id"], int(text))
+        return
+
+    if step == "bk_hero":
+        begin_draft(
+            user,
+            state["chat_id"],
+            message["chat"]["id"],
+            state["message_id"],
+            locked=message["text"].strip(),
+        )
         return
 
     if step == "tag_text":
