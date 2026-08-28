@@ -28,6 +28,7 @@ from config import (  # noqa: E402
     DOTA_CUSTOM_PLAN_PRICE,
     DOTA_DRAFT_PRICE,
     DOTA_REROLL_PRICE,
+    FOOD_ITEMS,
     GIVE_COOLDOWN_SECONDS,
     GREEN_COOLDOWN_SECONDS,
     GREEN_IMMUNITY_LIMIT,
@@ -1262,6 +1263,135 @@ def finish_tag(
         )
 
 
+# --- /food: gift a joke item to another participant, chat-announced --------
+
+
+def start_food_flow(giver: dict, dm_chat_id) -> None:
+    """Entry point for /food from the bot's DM: pick a chat first if there are several."""
+    chats = storage.list_user_chats(giver["id"])
+    if not chats:
+        tg.send_message(
+            dm_chat_id,
+            "Я пока не знаю ни одного чата, где вы состоите.\n"
+            f"Напишите что-нибудь в группе, где я работаю, и повторите {FOOD_COMMAND}.",
+        )
+        return
+
+    if len(chats) == 1:
+        show_food_target_picker(giver, dm_chat_id, chats[0][0], None)
+        return
+
+    keyboard = [[{"text": title, "callback_data": f"foodchat:{cid}"}] for cid, title in chats]
+    keyboard.append([CANCEL_BUTTON])
+    sent = tg.send_message(
+        dm_chat_id, "В каком чате угощаем?", reply_markup={"inline_keyboard": keyboard}
+    )
+    storage.set_state(giver["id"], {"step": "food_chat", "message_id": sent.get("message_id")})
+
+
+def show_food_target_picker(giver: dict, dm_chat_id, chat_id, message_id) -> None:
+    sync_administrators(chat_id)
+    participants = [
+        (uid, name) for uid, name in storage.list_participants(chat_id) if str(uid) != str(giver["id"])
+    ]
+
+    if not participants:
+        text = (
+            "В этом чате я пока никого не видел.\n"
+            "Участники появятся в списке после того, как напишут что-нибудь в чате."
+        )
+        keyboard = None
+    else:
+        text = "Кого угощаем?"
+        keyboard = {
+            "inline_keyboard": [
+                *[
+                    [{"text": name, "callback_data": f"fooduser:{chat_id}:{uid}"}]
+                    for uid, name in participants
+                ],
+                [CANCEL_BUTTON],
+            ]
+        }
+
+    if message_id is None:
+        sent = send_to_dm(giver, chat_id, text, keyboard)
+        if sent is None:
+            return
+        message_id = sent.get("message_id")
+    else:
+        tg.edit_message_text(dm_chat_id, message_id, text, reply_markup=keyboard)
+
+    storage.set_state(
+        giver["id"], {"step": "food_target", "chat_id": str(chat_id), "message_id": message_id}
+    )
+
+
+def show_food_tier_picker(giver: dict, dm_chat_id, chat_id, message_id, target_id) -> None:
+    balance = get_kabankoins(chat_id, giver["id"])
+    target_name = storage.get_name(chat_id, target_id) or str(target_id)
+    affordable = [(price, item) for price, item in FOOD_ITEMS if price <= balance]
+
+    if not affordable:
+        text = insufficient_balance_text(balance)
+        if message_id is None:
+            send_to_dm(giver, chat_id, text)
+        else:
+            tg.edit_message_text(dm_chat_id, message_id, text)
+        storage.clear_state(giver["id"])
+        return
+
+    text = f"{KABANKOIN_EMOJI} Баланс: {balance}\nКому: {target_name}\nЧто дать?"
+    keyboard = {
+        "inline_keyboard": [
+            *[
+                [{"text": f"{price} {KABANKOIN_EMOJI} — {item}", "callback_data": f"foodtier:{price}"}]
+                for price, item in affordable
+            ],
+            [CANCEL_BUTTON],
+        ]
+    }
+
+    if message_id is None:
+        sent = send_to_dm(giver, chat_id, text, keyboard)
+        if sent is None:
+            return
+        message_id = sent.get("message_id")
+    else:
+        tg.edit_message_text(dm_chat_id, message_id, text, reply_markup=keyboard)
+
+    storage.set_state(
+        giver["id"],
+        {"step": "food_tier", "chat_id": str(chat_id), "target_id": str(target_id), "message_id": message_id},
+    )
+
+
+def finish_food(giver: dict, ack_chat_id, chat_id, target_id, price: int) -> None:
+    storage.clear_state(giver["id"])
+    giver_name = display_name(giver)
+    target_name = storage.get_name(chat_id, target_id) or str(target_id)
+    given_from_group = str(ack_chat_id) == str(chat_id)
+    item = next(item for tier_price, item in FOOD_ITEMS if tier_price == price)
+
+    if not tg.is_chat_member(chat_id, giver["id"]):
+        tg.send_message(ack_chat_id, "Вы больше не состоите в этом чате — покупка не выполнена.")
+        return
+
+    spent, balance = storage.spend_kabankoins(
+        chat_id, giver["id"], current_day_key(), price, KABANKOIN_DAILY_AMOUNT
+    )
+    if not spent:
+        tg.send_message(ack_chat_id, insufficient_balance_text(balance))
+        return
+
+    tg.send_message(
+        chat_id,
+        f"🍔 {giver_name} даёт {target_name} {item}!\n"
+        f"Баланс {giver_name}: {balance} {KABANKOIN_EMOJI}",
+    )
+    if not given_from_group:
+        tg.send_message(ack_chat_id, f"Готово, {item} для {target_name} — в чате.")
+
+
 # --- /bk: a rolled Dota line-up, revealed one hero at a time ----------------
 
 
@@ -1800,6 +1930,30 @@ def handle_tag(message: dict, args: str) -> None:
     show_tag_target_picker(giver, chat["id"], chat["id"], None)
 
 
+def handle_food(message: dict, args: str) -> None:
+    chat = message["chat"]
+    giver = message["from"]
+
+    if chat.get("type") not in GROUP_TYPES:
+        start_food_flow(giver, chat["id"])
+        return
+
+    reply = message.get("reply_to_message")
+    if reply and "from" in reply:
+        target = reply["from"]
+        if target.get("is_bot"):
+            tg.send_message(chat["id"], "Ботов не кормим.", message["message_id"])
+            return
+        if target["id"] == giver["id"]:
+            tg.send_message(chat["id"], "Нельзя угостить самого себя.", message["message_id"])
+            return
+        storage.remember_participant(chat["id"], target["id"], display_name(target))
+        show_food_tier_picker(giver, chat["id"], chat["id"], None, target["id"])
+        return
+
+    show_food_target_picker(giver, chat["id"], chat["id"], None)
+
+
 def handle_bk(message: dict, args: str) -> None:
     chat = message["chat"]
     giver = message["from"]
@@ -1943,6 +2097,10 @@ def handle_start(message: dict, args: str) -> None:
         "вы пишете название и стратегию, а героев подбираю я.\n"
         "Когда пик собран, любого из выбранных ботом можно заменить на другого "
         f"из того же плана за {DOTA_REROLL_PRICE} {KABANKOIN_EMOJI}.\n\n"
+        f"{FOOD_COMMAND} — угостить участника, результат в чате: ответом на "
+        "сообщение или без ответа — список получателей в личке. Тарифы: "
+        + ", ".join(f"{price} {KABANKOIN_EMOJI} — {item}" for price, item in FOOD_ITEMS)
+        + ".\n\n"
         f"{LIST_COMMAND} — список карточек участников чата.",
     )
 
@@ -1954,6 +2112,7 @@ LIST_COMMAND = "/list"
 PAY_COMMAND = "/send"
 TAG_COMMAND = "/tag"
 BK_COMMAND = "/bk"
+FOOD_COMMAND = "/food"
 
 # Default handout for /givecoins when no amount is given.
 GIVE_COINS_DEFAULT = 25
@@ -1972,6 +2131,7 @@ COMMANDS = {
     PAY_COMMAND: handle_pay,
     TAG_COMMAND: handle_tag,
     BK_COMMAND: handle_bk,
+    FOOD_COMMAND: handle_food,
     "/resetcoins": handle_reset_coins,
     "/givecoins": handle_give_coins,
     # Previous names, kept working as aliases.
@@ -2004,6 +2164,7 @@ def _handle_callback(callback: dict) -> None:
             "gu:", "sl:", "cchat:", "ctype:", "cuser:", "cbet:",
             "paychat:", "payuser:", "tagchat:", "taguser:", "tagtier:",
             "bkchat:", "bknext", "bkskip", "bkre:", "bkplan",
+            "foodchat:", "fooduser:", "foodtier:",
         )
     ) or (data == "cancel" and message["chat"].get("type") in GROUP_TYPES)
     if needs_state and not state:
@@ -2015,6 +2176,8 @@ def _handle_callback(callback: dict) -> None:
             text = "Это не ваш тег."
         elif data.startswith(("bkchat:", "bknext", "bkskip", "bkre:", "bkplan")):
             text = "Это не ваш пик."
+        elif data.startswith(("foodchat:", "fooduser:", "foodtier:")):
+            text = "Это не ваше угощение."
         else:
             text = "Это не ваша карточка."
         tg.answer_callback_query(callback["id"], text)
@@ -2173,6 +2336,30 @@ def _handle_callback(callback: dict) -> None:
         ask_tag_text(
             user["id"], dm_chat_id, message_id, state["chat_id"], state["target_id"], int(seconds), int(price)
         )
+        return
+
+    if data.startswith("foodchat:"):
+        if state.get("step") != "food_chat" or state.get("message_id") != message_id:
+            tg.edit_message_text(dm_chat_id, message_id, f"Устарело, начните заново: {FOOD_COMMAND}")
+            return
+        chat_id = data.split(":", 1)[1]
+        show_food_target_picker(user, dm_chat_id, chat_id, message_id)
+        return
+
+    if data.startswith("fooduser:"):
+        if state.get("step") != "food_target" or state.get("message_id") != message_id:
+            tg.edit_message_text(dm_chat_id, message_id, f"Устарело, начните заново: {FOOD_COMMAND}")
+            return
+        _, chat_id, target_id = data.split(":", 2)
+        show_food_tier_picker(user, dm_chat_id, chat_id, message_id, target_id)
+        return
+
+    if data.startswith("foodtier:"):
+        if state.get("step") != "food_tier" or state.get("message_id") != message_id:
+            tg.edit_message_text(dm_chat_id, message_id, f"Устарело, начните заново: {FOOD_COMMAND}")
+            return
+        price = int(data.split(":", 1)[1])
+        finish_food(user, dm_chat_id, state["chat_id"], state["target_id"], price)
         return
 
     if data.startswith("bkchat:"):

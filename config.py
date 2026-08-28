@@ -88,6 +88,15 @@ DOTA_REROLL_PRICE = 10
 # than a rolled draft because the player supplies the idea.
 DOTA_CUSTOM_PLAN_PRICE = 25
 
+# /food: gift someone a joke item, announced in the chat. No real delivery —
+# it is the announcement itself that is the point. Each tier is (price, item).
+FOOD_ITEMS = [
+    (50, "двойную вялую"),
+    (100, "3 литра «Медведя»"),
+    (150, "шёлковый"),
+    (200, "Нутришес"),
+]
+
 # Casino bets no longer get refused for lack of funds — they can go into debt
 # instead, down to KABANKOIN_DEBT_BAN_LEVEL. Crossing each level below
 # punishes the spinner in the group chat; once debt reaches the ban level,
