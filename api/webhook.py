@@ -1329,7 +1329,11 @@ def show_food_target_picker(giver: dict, dm_chat_id, chat_id, message_id) -> Non
 def show_food_tier_picker(giver: dict, dm_chat_id, chat_id, message_id, target_id) -> None:
     balance = get_kabankoins(chat_id, giver["id"])
     target_name = storage.get_name(chat_id, target_id) or str(target_id)
-    affordable = [(price, item) for price, item in FOOD_ITEMS if price <= balance]
+    # Indexed rather than keyed by price: several items can share a price, so
+    # the price alone can't identify which one was picked.
+    affordable = [
+        (index, price, item) for index, (price, item) in enumerate(FOOD_ITEMS) if price <= balance
+    ]
 
     if not affordable:
         text = insufficient_balance_text(balance)
@@ -1344,8 +1348,8 @@ def show_food_tier_picker(giver: dict, dm_chat_id, chat_id, message_id, target_i
     keyboard = {
         "inline_keyboard": [
             *[
-                [{"text": f"{price} {KABANKOIN_EMOJI} — {item}", "callback_data": f"foodtier:{price}"}]
-                for price, item in affordable
+                [{"text": f"{price} {KABANKOIN_EMOJI} — {item}", "callback_data": f"foodtier:{index}"}]
+                for index, price, item in affordable
             ],
             [CANCEL_BUTTON],
         ]
@@ -1365,12 +1369,12 @@ def show_food_tier_picker(giver: dict, dm_chat_id, chat_id, message_id, target_i
     )
 
 
-def finish_food(giver: dict, ack_chat_id, chat_id, target_id, price: int) -> None:
+def finish_food(giver: dict, ack_chat_id, chat_id, target_id, index: int) -> None:
     storage.clear_state(giver["id"])
     giver_name = display_name(giver)
     target_name = storage.get_name(chat_id, target_id) or str(target_id)
     given_from_group = str(ack_chat_id) == str(chat_id)
-    item = next(item for tier_price, item in FOOD_ITEMS if tier_price == price)
+    price, item = FOOD_ITEMS[index]
 
     if not tg.is_chat_member(chat_id, giver["id"]):
         tg.send_message(ack_chat_id, "Вы больше не состоите в этом чате — покупка не выполнена.")
@@ -2358,8 +2362,8 @@ def _handle_callback(callback: dict) -> None:
         if state.get("step") != "food_tier" or state.get("message_id") != message_id:
             tg.edit_message_text(dm_chat_id, message_id, f"Устарело, начните заново: {FOOD_COMMAND}")
             return
-        price = int(data.split(":", 1)[1])
-        finish_food(user, dm_chat_id, state["chat_id"], state["target_id"], price)
+        index = int(data.split(":", 1)[1])
+        finish_food(user, dm_chat_id, state["chat_id"], state["target_id"], index)
         return
 
     if data.startswith("bkchat:"):

@@ -89,12 +89,16 @@ DOTA_REROLL_PRICE = 10
 DOTA_CUSTOM_PLAN_PRICE = 25
 
 # /food: gift someone a joke item, announced in the chat. No real delivery —
-# it is the announcement itself that is the point. Each tier is (price, item).
+# it is the announcement itself that is the point. Several items can share a
+# price, so this is (price, item) pairs rather than a price-keyed mapping.
 FOOD_ITEMS = [
     (50, "двойную вялую"),
+    (50, "додис"),
     (100, "3 литра «Медведя»"),
     (150, "шёлковый"),
+    (150, "винстон синий"),
     (200, "Нутришес"),
+    (200, "решить хинкальный вопрос"),
 ]
 
 # Casino bets no longer get refused for lack of funds — they can go into debt
